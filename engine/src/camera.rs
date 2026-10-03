@@ -17,6 +17,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy_egui::input::EguiWantsInput;
 
+use crate::avatar::{FigureColors, Gait, spawn_figure};
 use crate::buildings::BuildingIndex;
 use crate::level::{Heightmap, Level, LevelState};
 use crate::landmarks::{Landmarks, deck_height};
@@ -186,19 +187,16 @@ fn spawn_player(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let body = materials.add(StandardMaterial { base_color: Color::srgb(0.95, 0.45, 0.10), ..default() });
-    let skin = materials.add(StandardMaterial { base_color: Color::srgb(0.85, 0.68, 0.55), ..default() });
-    commands
+    let player = commands
         .spawn((
             Player { heading: 0.0, vertical_speed: 0.0, airborne: false },
+            Gait::default(),
             Name::new("Player"),
             Transform::from_xyz(START.x, level.heightmap.sample(START.x, START.y), START.y),
             Visibility::Hidden,
         ))
-        .with_children(|p| {
-            p.spawn((Mesh3d(meshes.add(Capsule3d::new(0.25, 0.9))), MeshMaterial3d(body), Transform::from_xyz(0.0, 0.95, 0.0)));
-            p.spawn((Mesh3d(meshes.add(Sphere::new(0.13))), MeshMaterial3d(skin), Transform::from_xyz(0.0, 1.62, 0.0)));
-        });
+        .id();
+    spawn_figure(&mut commands, player, FigureColors::default(), &mut meshes, &mut materials);
 }
 
 fn cursor_ray(window: &Window, camera: &Camera, cam_tf: &GlobalTransform) -> Option<Ray3d> {
@@ -449,9 +447,9 @@ fn walk_player(
     decks: Option<Res<BridgeDecks>>,
     landmarks: Option<Res<Landmarks>>,
     cams: Query<&ViewAngles>,
-    mut players: Query<(&mut Player, &mut Transform)>,
+    mut players: Query<(&mut Player, &mut Gait, &mut Transform)>,
 ) {
-    let (Ok(angles), Ok((mut player, mut transform))) = (cams.single(), players.single_mut()) else { return };
+    let (Ok(angles), Ok((mut player, mut gait, mut transform))) = (cams.single(), players.single_mut()) else { return };
     let step = Quat::from_rotation_y(angles.yaw) * move_input(&keys) * WALK_SPEED * boost(&keys) * time.delta_secs();
     if step != Vec3::ZERO {
         let target = (-step.x).atan2(-step.z);
@@ -485,6 +483,10 @@ fn walk_player(
     } else {
         p.y = ground;
     }
+    // Animation input for the runner figure.
+    let dt_safe = dt.max(1e-4);
+    gait.speed = (p - transform.translation).with_y(0.0).length() / dt_safe;
+    gait.airborne = player.airborne;
     transform.translation = p;
     transform.rotation = Quat::from_rotation_y(player.heading);
 }

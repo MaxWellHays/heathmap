@@ -15,6 +15,7 @@ Outputs in engine/assets/levels/heath/ (generated, not committed):
   water.bin      pond and lake outlines (engine builds flat water surfaces)
   props.bin      benches, lamps, signals, bus stops, crossings, fountains… (oriented)
   barriers.bin   fences, walls, hedges, retaining walls
+  runs.bin       your runs from a local Strava export (data/raw/strava/), for routes and ghosts
 """
 
 import csv
@@ -222,7 +223,7 @@ def export_ground_sdf(meta: dict) -> None:
     print(f"  ground sdf: {len(SDF_CLASSES)} classes, {out_w}×{out_h} at {SDF_RES} m")
 
 
-TRUNK_CLEARANCE = 0.6  # metres between a trunk and the edge of a road or path
+TRUNK_CLEARANCE = 0.4  # metres a moved trunk ends up outside the road or path edge
 
 
 def path_areas() -> list:
@@ -238,7 +239,7 @@ def path_areas() -> list:
             width = {"track": 3.0, "steps": 2.0}.get(hw, 1.5)
         else:
             continue
-        areas.append(shape(f["geometry"]).buffer(width / 2 + TRUNK_CLEARANCE))
+        areas.append(shape(f["geometry"]).buffer(width / 2))
     return areas
 
 
@@ -255,24 +256,32 @@ def export_trees(meta: dict) -> None:
     rows = list(csv.DictReader((BUILD_DIR / "trees_lidar.csv").open()))
     areas = path_areas()
     index = STRtree(areas)
+    buildings = [shape(f["geometry"]).buffer(0.5) for f in json.loads((BUILD_DIR / "buildings.geojson").read_text())["features"]]
+    building_index = STRtree(buildings)
+    in_building = lambda q: len(building_index.query(q, predicate="intersects")) > 0
     data = np.empty((len(rows), 5), dtype="<f4")
-    moved = 0
+    moved = kept = 0
     for i, r in enumerate(rows):
         bx, by = float(r["x"]), float(r["y"])
         p = Point(bx, by)
         hits = [areas[j] for j in index.query(p, predicate="intersects")]
         if hits:
             region = unary_union(hits)
-            # Push to the nearest point on the region's boundary, plus a little more outwards.
+            # Push to the nearest point on the region's edge, plus a little clearance. Never
+            # into a building: then the tree stays put (street trees on narrow pavements).
             edge = nearest_points(region.boundary, p)[0]
             direction = np.array([edge.x - bx, edge.y - by])
             norm = np.linalg.norm(direction)
             if norm > 1e-6:
-                bx, by = edge.x + direction[0] / norm * 0.1, edge.y + direction[1] / norm * 0.1
-                moved += 1
+                nx, ny = edge.x + direction[0] / norm * TRUNK_CLEARANCE, edge.y + direction[1] / norm * TRUNK_CLEARANCE
+                if in_building(Point(nx, ny)):
+                    kept += 1
+                else:
+                    bx, by = nx, ny
+                    moved += 1
         x, z = to_local(bx, by)
         data[i] = (x, z, float(r["ground"]), float(r["height"]), float(r["crown_r"]))
-    print(f"    moved {moved} trunks off roads and paths")
+    print(f"    moved {moved} trunks off roads and paths ({kept} left in place: a building was in the way)")
     (LEVEL_DIR / "trees.bin").write_bytes(data.tobytes())
     meta["trees"] = {"file": "trees.bin", "count": len(rows), "fields": ["x", "z", "ground", "height", "crown_r"]}
     print(f"  trees: {len(rows)}")
@@ -382,6 +391,36 @@ def export_landmarks(meta: dict) -> None:
     struct.pack_into("<I", out, 0, count)
     (LEVEL_DIR / "landmarks.bin").write_bytes(out)
     meta["landmarks"] = {"file": "landmarks.bin", "count": count}
+
+
+STRAVA_FILE = RAW_DIR / "strava" / "strava_runs.json"  # personal data: local only, never committed
+
+
+def export_runs(meta: dict) -> None:
+    """Your runs (from a Strava export, if present) as tracks for routes and ghost runners.
+
+    Format (little-endian): u32 count, then per run: u64 activity id, i64 start (Unix
+    seconds), u32 point count, point count × (f32 x, f32 z, f32 seconds since start).
+    Runs without GPS (treadmill) are skipped. With no Strava file, an empty list is written.
+    """
+    from pyproj import Transformer
+    out = bytearray(struct.pack("<I", 0))
+    count = 0
+    if STRAVA_FILE.exists():
+        t = Transformer.from_crs("EPSG:4326", "EPSG:27700", always_xy=True)
+        for r in json.loads(STRAVA_FILE.read_text())["runs"]:
+            ll, times = r.get("latlng") or [], r.get("time") or []
+            if len(ll) < 2 or len(times) != len(ll):
+                continue
+            lat, lon = np.array(ll).T
+            xs, ys = t.transform(lon, lat)
+            out += struct.pack("<QqI", int(r["id"]), int(r.get("start_epoch") or 0), len(ll))
+            out += struct.pack(f"<{3 * len(ll)}f", *(v for x, y, tt in zip(xs, ys, times) for v in (*to_local(x, y), float(tt))))
+            count += 1
+    struct.pack_into("<I", out, 0, count)
+    (LEVEL_DIR / "runs.bin").write_bytes(out)
+    meta["runs"] = {"file": "runs.bin", "count": count}
+    print(f"  runs: {count}")
 
 
 # Prop kinds shared with the engine (engine/src/props.rs).
@@ -614,6 +653,7 @@ def main() -> None:
     export_water(meta)
     export_props(meta)
     export_barriers(meta)
+    export_runs(meta)
     (LEVEL_DIR / "level.json").write_text(json.dumps(meta, indent=2) + "\n")
     sizes = {p.name: f"{p.stat().st_size / 1e6:.1f} MB" for p in sorted(LEVEL_DIR.iterdir())}
     print(f"Wrote {LEVEL_DIR}: {sizes}")

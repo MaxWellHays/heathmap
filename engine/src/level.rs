@@ -50,6 +50,7 @@ pub struct LevelMeta {
     pub props: FileMeta,
     pub barriers: FileMeta,
     pub landmarks: FileMeta,
+    pub runs: FileMeta,
 }
 
 /// Raw bytes of a `.bin` file; decoded once all level files have arrived.
@@ -213,6 +214,7 @@ pub struct LevelHandles {
     pub props: Option<Handle<BinaryFile>>,
     pub barriers: Option<Handle<BinaryFile>>,
     pub landmarks: Option<Handle<BinaryFile>>,
+    pub runs: Option<Handle<BinaryFile>>,
 }
 
 /// The loaded level, available once `LevelState::Ready` is reached.
@@ -248,6 +250,7 @@ impl Plugin for LevelPlugin {
                     props: None,
                     barriers: None,
                     landmarks: None,
+                    runs: None,
                 });
             })
             .add_systems(Update, request_data.run_if(in_state(LevelState::LoadingMeta)))
@@ -272,6 +275,7 @@ fn request_data(
     handles.props = Some(assets.load(format!("{dir}/{}", meta.props.file)));
     handles.barriers = Some(assets.load(format!("{dir}/{}", meta.barriers.file)));
     handles.landmarks = Some(assets.load(format!("{dir}/{}", meta.landmarks.file)));
+    handles.runs = Some(assets.load(format!("{dir}/{}", meta.runs.file)));
     next.set(LevelState::LoadingData);
 }
 
@@ -291,7 +295,7 @@ fn finish_loading(
     };
     // Buildings and lines are decoded by their own plugins; just wait for them to arrive.
     let arrived = |h: &Option<Handle<BinaryFile>>| h.as_ref().is_some_and(|h| files.contains(h));
-    let files_needed = [&handles.buildings, &handles.lines, &handles.ground_sdf, &handles.water, &handles.props, &handles.barriers, &handles.landmarks];
+    let files_needed = [&handles.buildings, &handles.lines, &handles.ground_sdf, &handles.water, &handles.props, &handles.barriers, &handles.landmarks, &handles.runs];
     if !files_needed.into_iter().all(arrived) {
         return;
     }

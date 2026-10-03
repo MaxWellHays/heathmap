@@ -12,6 +12,7 @@ use crate::ground::ElevationSettings;
 use crate::camera::{CameraMode, ModeRequest, cursor_captured, keyboard_free};
 use crate::lines::Lines;
 use crate::props::{Barriers, Props};
+use crate::runs::{RunPlayback, Runs};
 use crate::trees::Trees;
 
 /// What is drawn and where the sun is. Changed from the panel or keys (B, T).
@@ -79,6 +80,8 @@ fn panel(
     mut elevation: ResMut<ElevationSettings>,
     mut bookmarks: ResMut<Bookmarks>,
     mut bookmark_name: Local<String>,
+    runs: Res<Runs>,
+    mut playback: ResMut<RunPlayback>,
     mut styled: Local<bool>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -151,6 +154,27 @@ fn panel(
             );
             ui.add(egui::Slider::new(&mut layers.sun_elevation, 3.0..=85.0).text("height").suffix("°"));
             ui.separator();
+
+            if !runs.0.is_empty() {
+                ui.label(egui::RichText::new(format!("MY RUNS ({})", runs.0.len())).color(MUTED).small());
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut playback.show_routes, "Routes");
+                    ui.checkbox(&mut playback.show_ghosts, "Ghost runners");
+                });
+                ui.horizontal(|ui| {
+                    let label = if playback.playing { "Pause" } else { "Play" };
+                    if ui.small_button(label).clicked() {
+                        playback.playing = !playback.playing;
+                    }
+                    if ui.small_button("Restart").clicked() {
+                        playback.time = 0.0;
+                    }
+                    let t = playback.time as u32;
+                    ui.label(egui::RichText::new(format!("{}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60)).small().color(MUTED));
+                });
+                ui.add(egui::Slider::new(&mut playback.speed, 1.0..=60.0).logarithmic(true).text("speed").suffix("×"));
+                ui.separator();
+            }
 
             egui::CollapsingHeader::new(egui::RichText::new("Bookmarks").color(MUTED)).default_open(false).show(ui, |ui| {
                 ui.horizontal(|ui| {

@@ -4,6 +4,7 @@
 //! bevy_brp_extras), so tools can inspect the world, send input and take
 //! screenshots. Everything else compiles for wasm32 as well.
 
+mod avatar;
 mod buildings;
 mod camera;
 mod ground;
@@ -13,6 +14,7 @@ mod lines;
 mod lod;
 mod pick;
 mod props;
+mod runs;
 mod terrain;
 mod textures;
 mod trees;
@@ -24,6 +26,7 @@ use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::light::{CascadeShadowConfig, CascadeShadowConfigBuilder, DirectionalLightShadowMap};
 use bevy::prelude::*;
 
+use avatar::AvatarPlugin;
 use buildings::BuildingsPlugin;
 use ground::GroundPlugin;
 use camera::CameraPlugin;
@@ -33,6 +36,7 @@ use lines::LinesPlugin;
 use lod::LodPlugin;
 use pick::PickPlugin;
 use props::PropsPlugin;
+use runs::RunsPlugin;
 use terrain::TerrainPlugin;
 use trees::TreesPlugin;
 use ui::{Sun, UiPlugin};
@@ -62,9 +66,14 @@ fn main() {
         PickPlugin,
         CameraPlugin,
         UiPlugin,
+    ))
+    // Bevy plugin tuples hold at most 15 entries, so the world content goes in a second group.
+    .add_plugins((
         WaterPlugin,
         PropsPlugin,
         LandmarksPlugin,
+        AvatarPlugin,
+        RunsPlugin,
         BookmarksPlugin,
     ))
     .insert_resource(ClearColor(Color::srgb(0.78, 0.85, 0.92)))
