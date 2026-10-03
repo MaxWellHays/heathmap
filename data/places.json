@@ -1,0 +1,206 @@
+[
+  {
+    "id": "parliament-hill",
+    "name": "Parliament Hill",
+    "category": "hill",
+    "lonlat": [-0.15976, 51.55965],
+    "snapToSummit": 80,
+    "description": "Also known as Kite Hill. Its protected view takes in the City, St Paul's Cathedral and Canary Wharf.",
+    "osm": "node/719065360"
+  },
+  {
+    "id": "heath-summit",
+    "name": "Hampstead Heath summit",
+    "category": "hill",
+    "lonlat": [-0.17954, 51.5629],
+    "snapToSummit": 120,
+    "description": "The highest ground on the Heath, by Whitestone Pond and Jack Straw's Castle.",
+    "osm": "node/6441320834"
+  },
+  {
+    "id": "preachers-hill",
+    "name": "Preacher's Hill",
+    "category": "hill",
+    "lonlat": [-0.17003, 51.55796],
+    "snapToSummit": 60,
+    "description": "Rise on the East Heath above the Hampstead Ponds.",
+    "osm": "node/11020689749"
+  },
+  {
+    "id": "boudicca-mound",
+    "name": "Boudicca's Mound",
+    "category": "landmark",
+    "lonlat": [-0.16385, 51.56305],
+    "snapToSummit": 30,
+    "description": "Bronze Age bell barrow (tumulus), linked by legend with Queen Boudicca's grave.",
+    "osm": "way/1540871443"
+  },
+  {
+    "id": "sandy-heath",
+    "name": "Sandy Heath",
+    "category": "area",
+    "lonlat": [-0.17839, 51.56725],
+    "description": "Wooded area west of Spaniards Road, marked by Victorian sand quarrying.",
+    "osm": "way/664755007"
+  },
+  {
+    "id": "vale-of-health",
+    "name": "Vale of Health",
+    "category": "area",
+    "lonlat": [-0.17628, 51.56294],
+    "description": "Small hamlet in a hollow, surrounded on every side by the Heath.",
+    "osm": "node/7646215717"
+  },
+  {
+    "id": "heath-extension",
+    "name": "Hampstead Heath Extension",
+    "category": "area",
+    "lonlat": [-0.18396, 51.57438],
+    "description": "Former farmland added to the Heath in 1907, with open playing fields and hedgerows.",
+    "osm": "way/7789731"
+  },
+  {
+    "id": "kenwood-house",
+    "name": "Kenwood House",
+    "category": "landmark",
+    "lonlat": [-0.16734, 51.57155],
+    "description": "Neoclassical villa by Robert Adam with a fine art collection (Rembrandt, Vermeer). Free entry.",
+    "osm": "way/24653374"
+  },
+  {
+    "id": "hill-garden-pergola",
+    "name": "Hill Garden and Pergola",
+    "category": "landmark",
+    "lonlat": [-0.18279, 51.5646],
+    "description": "Edwardian raised pergola walkway and gardens, built for Lord Leverhulme.",
+    "osm": "way/1337350988"
+  },
+  {
+    "id": "golders-hill-zoo",
+    "name": "Golders Hill Park Zoo",
+    "category": "landmark",
+    "lonlat": [-0.18972, 51.56708],
+    "description": "Small free zoo with deer, donkeys, lemurs and birds.",
+    "osm": "way/29127976"
+  },
+  {
+    "id": "stone-of-free-speech",
+    "name": "Stone of Free Speech",
+    "category": "landmark",
+    "lonlat": [-0.15416, 51.56003],
+    "description": "Stone where public speakers are said to have gathered since the 19th century.",
+    "osm": "node/7575249878"
+  },
+  {
+    "id": "whitestone-pond",
+    "name": "Whitestone Pond",
+    "category": "landmark",
+    "lonlat": [-0.17987, 51.56152],
+    "description": "Pond at the top of Hampstead, next to the Heath's highest point.",
+    "osm": "way/5043242"
+  },
+  {
+    "id": "spaniards-inn",
+    "name": "The Spaniards Inn",
+    "category": "pub",
+    "lonlat": [-0.17408, 51.56986],
+    "description": "16th-century inn linked with Dick Turpin, Keats and Dickens.",
+    "osm": "way/334243397"
+  },
+  {
+    "id": "jack-straws-castle",
+    "name": "Jack Straw's Castle",
+    "category": "landmark",
+    "lonlat": [-0.18006, 51.56272],
+    "description": "Former coaching inn named after a leader of the 1381 Peasants' Revolt.",
+    "osm": "way/427786511"
+  },
+  {
+    "id": "parliament-hill-lido",
+    "name": "Parliament Hill Lido",
+    "category": "swimming",
+    "lonlat": [-0.15131, 51.55644],
+    "description": "Unheated 1938 stainless-steel lido, open all year round.",
+    "osm": "way/4264353"
+  },
+  {
+    "id": "mixed-pond",
+    "name": "Mixed Bathing Pond",
+    "category": "swimming",
+    "lonlat": [-0.16612, 51.56025],
+    "description": "Open-water swimming pond on the Hampstead side.",
+    "osm": "way/733568109"
+  },
+  {
+    "id": "mens-pond",
+    "name": "Men's Bathing Pond",
+    "category": "swimming",
+    "lonlat": [-0.15659, 51.56316],
+    "description": "Open-water swimming pond on the Highgate side.",
+    "osm": "way/735158560"
+  },
+  {
+    "id": "ladies-pond",
+    "name": "Kenwood Ladies' Bathing Pond",
+    "category": "swimming",
+    "lonlat": [-0.16042, 51.56699],
+    "description": "Secluded open-water swimming pond near Kenwood.",
+    "osm": "way/735158561"
+  },
+  {
+    "id": "athletics-track",
+    "name": "Parliament Hill Athletics Track",
+    "category": "running",
+    "lonlat": [-0.15566, 51.55726],
+    "description": "Public 400m track, home to the Highgate Harriers.",
+    "osm": "way/29233283"
+  },
+  {
+    "id": "keats-house",
+    "name": "Keats House",
+    "category": "museum",
+    "lonlat": [-0.16794, 51.55552],
+    "description": "Regency house where John Keats wrote 'Ode to a Nightingale'.",
+    "osm": "way/65272940"
+  },
+  {
+    "id": "burgh-house",
+    "name": "Burgh House",
+    "category": "museum",
+    "lonlat": [-0.17504, 51.55819],
+    "description": "Queen Anne house from 1704, now the Hampstead Museum.",
+    "osm": "way/77250946"
+  },
+  {
+    "id": "fenton-house",
+    "name": "Fenton House",
+    "category": "museum",
+    "lonlat": [-0.1797, 51.55888],
+    "description": "17th-century merchant's house with a walled garden and an early keyboard collection (National Trust).",
+    "osm": "way/110388485"
+  },
+  {
+    "id": "2-willow-road",
+    "name": "2 Willow Road",
+    "category": "museum",
+    "lonlat": [-0.16914, 51.5572],
+    "description": "Ernő Goldfinger's modernist home from 1939 (National Trust).",
+    "osm": "node/4440741736"
+  },
+  {
+    "id": "highgate-cemetery",
+    "name": "Highgate Cemetery",
+    "category": "landmark",
+    "lonlat": [-0.14646, 51.56684],
+    "description": "Victorian cemetery with Egyptian Avenue and the grave of Karl Marx.",
+    "osm": "relation/1612806"
+  },
+  {
+    "id": "lauderdale-house",
+    "name": "Lauderdale House",
+    "category": "landmark",
+    "lonlat": [-0.14342, 51.5693],
+    "description": "Tudor house in Waterlow Park, now an arts centre and café.",
+    "osm": "way/30210621"
+  }
+]
