@@ -28,7 +28,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: data/raw
-          key: raw-${{ hashFiles('data/area.py', 'data/fetch_dtm.py', 'data/fetch_osm.py') }}
+          key: raw-${{ hashFiles('data/area.py', 'data/fetch_*.py') }}
 
       - name: Install GDAL
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gdal-bin

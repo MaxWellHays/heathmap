@@ -1,4 +1,4 @@
-"""Generate contour lines from the LIDAR DTM mosaic (run fetch_dtm.py first).
+"""Generate contour lines from the LIDAR DTM mosaic (run fetch_lidar.py first).
 
 The 1m DTM is resampled to a coarser grid with averaging, which smooths away
 LIDAR noise (kerbs, ditches, tree pits) that would otherwise make jagged

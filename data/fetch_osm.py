@@ -1,7 +1,9 @@
 """Download OpenStreetMap features for the area via the Overpass API.
 
 Source: © OpenStreetMap contributors, ODbL.
-The raw response is cached in raw/osm.json; pass --refresh to refetch.
+- raw/osm.json: Heath features via the Overpass API
+- raw/greater-london.osm.pbf: Geofabrik extract, for buildings over the whole elevation extent
+Both are cached; pass --refresh to refetch.
 """
 
 import json
@@ -10,6 +12,9 @@ import sys
 import requests
 
 from area import BBOX_WGS84, RAW_DIR
+
+EXTRACT_URL = "https://download.geofabrik.de/europe/united-kingdom/england/greater-london-latest.osm.pbf"
+HEADERS = {"User-Agent": "heathmap/0.1 (github.com/MaxWellHays/heathmap)"}
 
 # Tried in order; the public servers are often overloaded.
 OVERPASS_URLS = [
@@ -39,26 +44,45 @@ out geom;
 """
 
 
-def main() -> None:
-    RAW_DIR.mkdir(parents=True, exist_ok=True)
-    path = RAW_DIR / "osm.json"
+def fetch_extract() -> None:
+    """Geofabrik's daily Greater London extract, for data too big for Overpass (buildings)."""
+    path = RAW_DIR / "greater-london.osm.pbf"
     if path.exists() and "--refresh" not in sys.argv:
         print(f"Using cached {path} (pass --refresh to refetch)")
         return
-    data = None
+    with requests.get(EXTRACT_URL, stream=True, timeout=600, headers=HEADERS) as resp:
+        resp.raise_for_status()
+        with path.open("wb") as f:
+            for chunk in resp.iter_content(chunk_size=1 << 20):
+                f.write(chunk)
+    print(f"Wrote {path} ({path.stat().st_size >> 20} MB)")
+
+
+def overpass(query: str) -> dict:
     for url in OVERPASS_URLS:
         try:
-            resp = requests.post(url, data={"data": build_query()}, timeout=300,
-                                 headers={"User-Agent": "heathmap/0.1 (github.com/MaxWellHays/heathmap)"})
+            resp = requests.post(url, data={"data": query}, timeout=400, headers=HEADERS)
             resp.raise_for_status()
-            data = resp.json()
-            break
+            return resp.json()
         except (requests.RequestException, ValueError) as err:
             print(f"  {url} failed: {err}")
-    if data is None:
-        raise SystemExit("All Overpass servers failed")
+    raise SystemExit("All Overpass servers failed")
+
+
+def fetch(name: str, query: str) -> None:
+    path = RAW_DIR / name
+    if path.exists() and "--refresh" not in sys.argv:
+        print(f"Using cached {path} (pass --refresh to refetch)")
+        return
+    data = overpass(query)
     path.write_text(json.dumps(data))
     print(f"Wrote {path} ({len(data['elements'])} elements)")
+
+
+def main() -> None:
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    fetch("osm.json", build_query())
+    fetch_extract()
 
 
 if __name__ == "__main__":

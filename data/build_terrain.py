@@ -1,4 +1,4 @@
-"""Build Terrarium-encoded elevation tiles from the LIDAR DTM (run fetch_dtm.py first).
+"""Build Terrarium-encoded elevation tiles from the LIDAR DTM (run fetch_lidar.py first).
 
 MapLibre reads these through a `raster-dem` source for the 3D terrain, the
 elevation colour fill (color-relief) and hillshading.
