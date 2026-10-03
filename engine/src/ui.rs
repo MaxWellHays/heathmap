@@ -12,7 +12,7 @@ use crate::ground::ElevationSettings;
 use crate::camera::{CameraMode, ModeRequest, cursor_captured, keyboard_free};
 use crate::lines::Lines;
 use crate::props::{Barriers, Props};
-use crate::runs::{Race, RaceState, RunPlayback, Runs};
+use crate::runs::{Race, RunPlayback, Runs, run_color};
 use crate::trees::Trees;
 
 /// What is drawn and where the sun is. Changed from the panel or keys (B, T).
@@ -174,23 +174,15 @@ fn panel(
                     ui.label(egui::RichText::new(format!("{}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60)).small().color(MUTED));
                 });
                 ui.add(egui::Slider::new(&mut playback.speed, 1.0..=60.0).logarithmic(true).text("speed").suffix("×"));
-                // Racing your past runs from where you stand.
-                let button = if race.state == RaceState::Off { "Race my runs from here (G)" } else { "Stop race (G)" };
-                if ui.button(button).clicked() {
-                    race.toggle = true;
-                }
-                if let Some(msg) = &race.message {
-                    ui.label(egui::RichText::new(msg).small().italics().color(MUTED));
-                }
-                match race.state {
-                    RaceState::Off => {}
-                    RaceState::Ready => {
-                        ui.label(egui::RichText::new("Start moving to start the race").small().color(MUTED));
-                    }
-                    RaceState::Running => {
-                        let t = race.elapsed as u32;
-                        ui.label(egui::RichText::new(format!("Race time {}:{:02}", t / 60, t % 60)).small());
-                    }
+                // Race ghosts for the routes you're running, picked automatically.
+                ui.checkbox(&mut race.enabled, "Race ghosts on my routes (G)");
+                if race.enabled && race.ghosts.is_empty() {
+                    let hint = if race.trail_length() < 200.0 {
+                        "Run one of your routes in Walk or Third person"
+                    } else {
+                        "No run of yours followed your last stretch"
+                    };
+                    ui.label(egui::RichText::new(hint).small().italics().color(MUTED));
                 }
                 for g in &race.ghosts {
                     let run = &runs.0[g.run];
@@ -201,7 +193,11 @@ fn panel(
                     } else {
                         format!("behind by {:.0} s ({:.0} m)", -g.gap_s, g.gap_m.abs())
                     };
-                    ui.label(egui::RichText::new(format!("{} · {:.1} km: {status}", run.date(), run.length_km())).small());
+                    let swatch = egui::RichText::new("■").color(run_color32(g.run));
+                    ui.horizontal(|ui| {
+                        ui.label(swatch);
+                        ui.label(egui::RichText::new(format!("{} · {:.1} km: {status}", run.date(), run.length_km())).small());
+                    });
                 }
                 ui.separator();
             }
@@ -246,8 +242,8 @@ fn panel(
             egui::CollapsingHeader::new(egui::RichText::new("Controls").color(MUTED)).default_open(false).show(ui, |ui| {
                 let help = match current {
                     CameraMode::Map => "Drag: move the point you grabbed\nRight drag / Ctrl+drag: orbit around it\nScroll: zoom towards the cursor",
-                    CameraMode::Walk => "WASD: run at your pace, Shift: ×4.5, Space: jump\nG: race your past runs from here\nMouse: look around, Esc: release the mouse",
-                    CameraMode::ThirdPerson => "WASD: run at your pace, Shift: ×4.5, Space: jump\nG: race your past runs from here\nMouse: orbit the camera, scroll: zoom\nEsc: release the mouse",
+                    CameraMode::Walk => "WASD: run at your pace, Shift: ×4.5, Space: jump\nG: race ghosts on your routes on/off\nMouse: look around, Esc: release the mouse",
+                    CameraMode::ThirdPerson => "WASD: run at your pace, Shift: ×4.5, Space: jump\nG: race ghosts on your routes on/off\nMouse: orbit the camera, scroll: zoom\nEsc: release the mouse",
                     CameraMode::Fly => "WASD: fly, Space/C: up/down\nShift: ×4.5, scroll: speed\nMouse: look, Esc: release the mouse",
                 };
                 ui.label(egui::RichText::new(help).small());
@@ -296,4 +292,9 @@ fn apply_layers(
         let to_sun = Vec3::new(az.sin() * el.cos(), el.sin(), -az.cos() * el.cos());
         *transform = Transform::default().looking_to(-to_sun, Vec3::Y);
     }
+}
+
+fn run_color32(i: usize) -> egui::Color32 {
+    let [r, g, b, _] = run_color(i).to_srgba().to_u8_array();
+    egui::Color32::from_rgb(r, g, b)
 }

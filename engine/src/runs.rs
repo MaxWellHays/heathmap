@@ -2,16 +2,17 @@
 //! coloured line on the ground, and a ghost runner per run replaying it at the pace you
 //! actually ran (all starting together; playback speed adjustable from the panel).
 //!
-//! Racing: in walk / third person, press G (or use the panel) and the past runs that pass
-//! close to where you stand, heading the way you face, become race ghosts starting from
-//! that very point. They wait until you start moving, then run at their recorded pace;
-//! the panel shows how far ahead or behind each one is.
+//! Racing: in walk / third person your recent path is compared with all your runs; every
+//! run that followed the same way (same order, so same direction) gets a race ghost, timed
+//! as if you'd both started where your recent path began, running at its recorded pace.
+//! Several can race at once; each goes when you leave its route. The panel shows how far
+//! ahead or behind each one is. G (or the panel) turns this on and off.
 //!
 //! Your average moving pace across all runs becomes the default walking speed.
 
 use bevy::prelude::*;
 
-use crate::avatar::{FigureColors, Gait, spawn_figure};
+use crate::avatar::{FigureColors, Gait, RunnerAssets, spawn_figure};
 use crate::buildings::Reader;
 use crate::level::{BinaryFile, Heightmap, LevelHandles, LevelState};
 use crate::camera::{CameraMode, Player, RunnerSpeed, keyboard_free};
@@ -54,12 +55,6 @@ impl Run {
         let year = yoe + era * 400 + i64::from(month <= 2);
         const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
         format!("{day} {} {year}", MONTHS[(month - 1) as usize])
-    }
-
-    /// Direction of travel around point `i`.
-    fn direction_at(&self, i: usize) -> Vec2 {
-        let (a, b) = (i.saturating_sub(3), (i + 3).min(self.points.len() - 1));
-        (self.points[b].0 - self.points[a].0).normalize_or_zero()
     }
 
     /// Position, direction and speed (m/s) at `t` seconds into the run.
@@ -110,7 +105,7 @@ impl Plugin for RunsPlugin {
             .add_systems(OnEnter(LevelState::Ready), spawn_runs)
             .add_systems(
                 Update,
-                (move_ghosts, race_keys.run_if(keyboard_free), start_or_stop_race, update_race, apply_visibility)
+                (move_ghosts, race_keys.run_if(keyboard_free), track_routes, update_race, apply_visibility)
                     .chain()
                     .run_if(in_state(LevelState::Ready)),
             );
@@ -139,7 +134,7 @@ fn decode(bytes: &[u8]) -> Vec<Run> {
 }
 
 /// A distinct, saturated colour per run.
-fn run_color(i: usize) -> Color {
+pub fn run_color(i: usize) -> Color {
     Color::hsl((i as f32 * 137.5) % 360.0, 0.85, 0.5)
 }
 
@@ -150,6 +145,7 @@ fn spawn_runs(
     hm: Res<Heightmap>,
     mut runs: ResMut<Runs>,
     mut runner_speed: ResMut<RunnerSpeed>,
+    runner: Res<RunnerAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -195,7 +191,7 @@ fn spawn_runs(
             .spawn((Ghost(i), Gait::default(), Transform::from_xyz(p.x, hm.sample(p.x, p.y), p.y), Visibility::default()))
             .id();
         let colors = FigureColors::tinted(run_color(i));
-        spawn_figure(&mut commands, ghost, colors, &mut meshes, &mut materials);
+        spawn_figure(&mut commands, ghost, colors, &runner);
         commands.entity(ghosts).add_child(ghost);
     }
     info!("Loaded {} runs ({} points)", runs.0.len(), runs.0.iter().map(|r| r.points.len()).sum::<usize>());
@@ -251,165 +247,266 @@ fn apply_visibility(
     let vis = |on: bool| if on { Visibility::Inherited } else { Visibility::Hidden };
     routes.iter_mut().for_each(|mut v| *v = vis(playback.show_routes));
     // While racing, only the race ghosts run.
-    ghosts.iter_mut().for_each(|mut v| *v = vis(playback.show_ghosts && race.state == RaceState::Off));
+    ghosts.iter_mut().for_each(|mut v| *v = vis(playback.show_ghosts && !race.active()));
 }
 
 // ---------------------------------------------------------------------------------------
-// Racing your past runs
+// Racing your past runs, picked automatically by route
 
-const MATCH_RADIUS: f32 = 30.0; // m from your position to a run's track
-const MATCH_DIRECTION: f32 = 0.35; // cosine: the run must head roughly the way you face
-const MAX_RACE_GHOSTS: usize = 3;
+const TRAIL_STEP: f32 = 5.0; // m between trail points
+const TRAIL_LENGTH: f32 = 600.0; // m of your recent path kept for matching
+const MIN_MATCH_LENGTH: f32 = 200.0; // m you must run before a route can match
+const MATCH_TOLERANCE: f32 = 15.0; // m from your trail to the run's track
+const MATCH_FRACTION: f32 = 0.9; // of trail points that must be within tolerance
+const MATCH_INTERVAL: f32 = 1.0; // s between matching passes
+const OFF_ROUTE: f32 = 40.0; // m away from a ghost's route that counts as leaving it
+const OFF_ROUTE_GRACE: f32 = 5.0; // s off route before its ghost goes
+const TELEPORT: f32 = 25.0; // m moved in one frame: a jump (bookmark, mode switch), not running
+const MAX_RACE_GHOSTS: usize = 8;
 
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
-pub enum RaceState {
-    #[default]
-    Off,
-    /// Ghosts are placed; the clock starts when you start moving.
-    Ready,
-    Running,
+/// Your recent path in walk / third person, for recognising which routes you're on.
+#[derive(Default)]
+struct Trail {
+    /// (position, clock time)
+    points: Vec<(Vec2, f32)>,
+    length: f32,
 }
 
 pub struct RaceGhost {
     pub run: usize,
-    /// Time into the run at the matched starting point.
-    pub t0: f32,
+    /// Run time at the point where the race started (where your trail began).
+    t0: f32,
+    /// Your clock time when you passed that point.
+    start_clock: f32,
     /// Index of the track point nearest to you (follows you along the track).
     cursor: usize,
     /// Seconds the ghost is ahead (positive) or behind (negative) of you.
     pub gap_s: f32,
-    /// Metres the ghost is ahead (positive) or behind (negative) of you, along its route.
+    /// Metres between you and the ghost along its route.
     pub gap_m: f32,
     pub finished: bool,
+    off_route_for: f32,
     entity: Entity,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct Race {
-    pub state: RaceState,
-    pub elapsed: f32,
+    /// Race ghosts appear automatically when you run one of your routes.
+    pub enabled: bool,
     pub ghosts: Vec<RaceGhost>,
-    /// Set (by G or the panel) to start a race, or stop the current one.
-    pub toggle: bool,
-    /// Shown in the panel when no run passes nearby.
-    pub message: Option<String>,
+    trail: Trail,
+    clock: f32,
+    since_match: f32,
+    last_pos: Option<Vec2>,
+}
+
+impl Default for Race {
+    fn default() -> Self {
+        Self { enabled: true, ghosts: Vec::new(), trail: Trail::default(), clock: 0.0, since_match: 0.0, last_pos: None }
+    }
+}
+
+impl Race {
+    pub fn active(&self) -> bool {
+        !self.ghosts.is_empty()
+    }
+
+    /// How much of your recent path is available for matching (m).
+    pub fn trail_length(&self) -> f32 {
+        self.trail.length
+    }
+
+    fn clear(&mut self, commands: &mut Commands) {
+        for g in self.ghosts.drain(..) {
+            commands.entity(g.entity).despawn();
+        }
+        self.trail = Trail::default();
+        self.last_pos = None;
+    }
 }
 
 #[derive(Component)]
 struct RaceGhostMarker;
 
-fn race_keys(keys: Res<ButtonInput<KeyCode>>, mode: Res<State<CameraMode>>, mut race: ResMut<Race>) {
-    if keys.just_pressed(KeyCode::KeyG) && matches!(mode.get(), CameraMode::Walk | CameraMode::ThirdPerson) {
-        race.toggle = true;
+fn race_keys(keys: Res<ButtonInput<KeyCode>>, mut race: ResMut<Race>) {
+    if keys.just_pressed(KeyCode::KeyG) {
+        race.enabled = !race.enabled;
     }
 }
 
+/// Records your path, recognises the routes you're running and spawns / drops race ghosts.
 #[allow(clippy::too_many_arguments)]
-fn start_or_stop_race(
+fn track_routes(
     mut commands: Commands,
+    time: Res<Time>,
     mut race: ResMut<Race>,
     runs: Res<Runs>,
     mode: Res<State<CameraMode>>,
-    players: Query<(&Transform, &Player)>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    players: Query<&Transform, With<Player>>,
+    runner: Res<RunnerAssets>,
 ) {
-    // Leaving walk / third person ends a race.
-    let in_runner_mode = matches!(mode.get(), CameraMode::Walk | CameraMode::ThirdPerson);
-    if !race.toggle && (in_runner_mode || race.state == RaceState::Off) {
+    let running = race.enabled && matches!(mode.get(), CameraMode::Walk | CameraMode::ThirdPerson);
+    let Ok(tf) = players.single() else { return };
+    if !running || runs.0.is_empty() {
+        if race.last_pos.is_some() || race.active() {
+            race.clear(&mut commands);
+        }
         return;
     }
-    race.toggle = false;
-    if race.state != RaceState::Off {
-        for g in race.ghosts.drain(..) {
+    let dt = time.delta_secs();
+    race.clock += dt;
+    let (clock, here) = (race.clock, tf.translation.xz());
+    if race.last_pos.is_some_and(|p| p.distance(here) > TELEPORT) {
+        race.clear(&mut commands);
+    }
+    race.last_pos = Some(here);
+
+    // Extend the trail every few metres; drop its oldest part beyond the kept length.
+    let trail = &mut race.trail;
+    match trail.points.last() {
+        Some(&(last, _)) if last.distance(here) < TRAIL_STEP => {}
+        last => {
+            if let Some(&(last, _)) = last {
+                trail.length += last.distance(here);
+            }
+            trail.points.push((here, clock));
+            while trail.length > TRAIL_LENGTH && trail.points.len() > 2 {
+                trail.length -= trail.points[0].0.distance(trail.points[1].0);
+                trail.points.remove(0);
+            }
+        }
+    }
+
+    // Follow each ghost's route with your position; drop it once you leave the route.
+    let mut keep = Vec::new();
+    for mut g in std::mem::take(&mut race.ghosts) {
+        let run = &runs.0[g.run];
+        let (lo, hi) = (g.cursor.saturating_sub(20), (g.cursor + 200).min(run.points.len() - 1));
+        let nearest = (lo..=hi).min_by(|&a, &b| run.points[a].0.distance(here).total_cmp(&run.points[b].0.distance(here)));
+        if let Some(i) = nearest {
+            g.cursor = i;
+        }
+        let off = run.points[g.cursor].0.distance(here) > OFF_ROUTE || g.cursor + 1 >= run.points.len();
+        g.off_route_for = if off { g.off_route_for + dt } else { 0.0 };
+        if g.off_route_for > OFF_ROUTE_GRACE {
             commands.entity(g.entity).despawn();
+        } else {
+            keep.push(g);
         }
-        race.state = RaceState::Off;
-        race.message = None;
+    }
+    race.ghosts = keep;
+
+    // Every second, look for runs that follow your recent path.
+    race.since_match += dt;
+    if race.since_match < MATCH_INTERVAL || race.trail.length < MIN_MATCH_LENGTH {
         return;
     }
-    if !in_runner_mode {
-        race.message = Some("Switch to Walk or Third person to race".into());
-        return;
-    }
-    let Ok((tf, player)) = players.single() else { return };
-    let here = tf.translation.xz();
-    let facing = Vec2::new(-player.heading.sin(), -player.heading.cos());
-    // Best matching point of every run: near you, heading your way, with some run left.
-    let mut matches: Vec<(f32, usize, usize)> = Vec::new();
+    race.since_match = 0.0;
+    let mut found: Vec<(f32, RaceGhost)> = Vec::new();
     for (ri, run) in runs.0.iter().enumerate() {
-        let mut best: Option<(f32, usize)> = None;
-        for (i, p) in run.points.iter().enumerate() {
-            let d = p.0.distance(here);
-            if d > MATCH_RADIUS || run.duration() - p.1 < 60.0 {
-                continue;
-            }
-            let along = run.direction_at(i).dot(facing);
-            if along < MATCH_DIRECTION {
-                continue;
-            }
-            let score = d + 10.0 * (1.0 - along);
-            if best.is_none_or(|b| score < b.0) {
-                best = Some((score, i));
-            }
+        if race.ghosts.iter().any(|g| g.run == ri) {
+            continue;
         }
-        if let Some((score, i)) = best {
-            matches.push((score, ri, i));
+        if let Some((fit, start, cursor)) = match_trail(run, &race.trail.points) {
+            let start_clock = race.trail.points[0].1;
+            found.push((fit, RaceGhost {
+                run: ri,
+                t0: run.points[start].1,
+                start_clock,
+                cursor,
+                gap_s: 0.0,
+                gap_m: 0.0,
+                finished: false,
+                off_route_for: 0.0,
+                entity: Entity::PLACEHOLDER,
+            }));
         }
     }
-    matches.sort_by(|a, b| a.0.total_cmp(&b.0));
-    if matches.is_empty() {
-        race.message = Some("None of your runs pass here in this direction".into());
-        return;
-    }
-    for &(_, ri, i) in matches.iter().take(MAX_RACE_GHOSTS) {
-        let p = runs.0[ri].points[i].0;
-        let entity = commands
+    found.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (_, mut g) in found {
+        if race.ghosts.len() >= MAX_RACE_GHOSTS {
+            break;
+        }
+        let p = runs.0[g.run].points[g.cursor].0;
+        g.entity = commands
             .spawn((RaceGhostMarker, Gait::default(), Name::new("Race ghost"), Transform::from_xyz(p.x, tf.translation.y, p.y)))
             .id();
-        spawn_figure(&mut commands, entity, FigureColors::tinted(run_color(ri)), &mut meshes, &mut materials);
-        race.ghosts.push(RaceGhost { run: ri, t0: runs.0[ri].points[i].1, cursor: i, gap_s: 0.0, gap_m: 0.0, finished: false, entity });
+        spawn_figure(&mut commands, g.entity, FigureColors::tinted(run_color(g.run)), &runner);
+        info!("Racing your run of {} ({:.1} km)", runs.0[g.run].date(), runs.0[g.run].length_km());
+        race.ghosts.push(g);
     }
-    race.state = RaceState::Ready;
-    race.elapsed = 0.0;
-    race.message = None;
+}
+
+/// Whether `run` follows the `trail` (in the same order, so in the same direction).
+/// Returns (mean distance, run index where the trail starts, run index where it ends).
+fn match_trail(run: &Run, trail: &[(Vec2, f32)]) -> Option<(f32, usize, usize)> {
+    let first = trail[0].0;
+    let pts = &run.points;
+    // Candidate starts: points closest to the trail's start on each pass of the run near it.
+    let mut starts = Vec::new();
+    let mut i = 0;
+    while i < pts.len() {
+        if pts[i].0.distance(first) <= MATCH_TOLERANCE {
+            let mut best = i;
+            while i < pts.len() && pts[i].0.distance(first) <= MATCH_TOLERANCE {
+                if pts[i].0.distance(first) < pts[best].0.distance(first) {
+                    best = i;
+                }
+                i += 1;
+            }
+            starts.push(best);
+        }
+        i += 1;
+    }
+    let max_misses = ((1.0 - MATCH_FRACTION) * trail.len() as f32).floor() as usize;
+    let mut best: Option<(f32, usize, usize)> = None;
+    for start in starts {
+        // Walk the run forward alongside the trail, always to the nearest point ahead.
+        let (mut j, mut misses, mut total) = (start, 0, 0.0);
+        for &(q, _) in &trail[1..] {
+            let hi = (j + 60).min(pts.len() - 1);
+            let (k, d) = (j..=hi).map(|k| (k, pts[k].0.distance(q))).min_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+            if d > MATCH_TOLERANCE {
+                misses += 1;
+                if misses > max_misses {
+                    break;
+                }
+            } else {
+                j = k;
+            }
+            total += d.min(MATCH_TOLERANCE * 2.0);
+        }
+        let mean = total / (trail.len() - 1) as f32;
+        // The run must actually cover the trail, not just touch its start and end.
+        let covered = run.along[j] - run.along[start];
+        if misses <= max_misses && covered > 0.7 * trail_length(trail) && best.is_none_or(|b| mean < b.0) {
+            best = Some((mean, start, j));
+        }
+    }
+    best
+}
+
+fn trail_length(trail: &[(Vec2, f32)]) -> f32 {
+    trail.windows(2).map(|w| w[0].0.distance(w[1].0)).sum()
 }
 
 /// Moves the race ghosts and works out how far ahead or behind each one is.
 fn update_race(
-    time: Res<Time>,
     mut race: ResMut<Race>,
     runs: Res<Runs>,
     hm: Res<Heightmap>,
-    players: Query<(&Transform, &Gait), (With<Player>, Without<RaceGhostMarker>)>,
     mut ghost_tfs: Query<(&mut Transform, &mut Gait), With<RaceGhostMarker>>,
 ) {
-    if race.state == RaceState::Off {
-        return;
-    }
-    let Ok((player_tf, player_gait)) = players.single() else { return };
-    if race.state == RaceState::Ready && player_gait.speed > 0.5 {
-        race.state = RaceState::Running;
-    }
-    if race.state == RaceState::Running {
-        race.elapsed += time.delta_secs();
-    }
-    let (state, elapsed) = (race.state, race.elapsed);
-    let here = player_tf.translation.xz();
+    let clock = race.clock;
     for g in &mut race.ghosts {
         let run = &runs.0[g.run];
-        let t = (g.t0 + elapsed).min(run.duration());
+        let t = (g.t0 + clock - g.start_clock).min(run.duration());
         g.finished = t >= run.duration();
         let (p, dir, speed) = run.sample(t);
         if let Ok((mut tf, mut gait)) = ghost_tfs.get_mut(g.entity) {
             tf.translation = Vec3::new(p.x, hm.sample(p.x, p.y), p.y);
             tf.rotation = Quat::from_rotation_y((-dir.x).atan2(-dir.y));
-            gait.speed = if state == RaceState::Running && !g.finished { speed } else { 0.0 };
-        }
-        // Your progress along the ghost's route: the nearest track point near the last one.
-        let (lo, hi) = (g.cursor.saturating_sub(30), (g.cursor + 300).min(run.points.len() - 1));
-        if let Some(best) = (lo..=hi).min_by(|&a, &b| run.points[a].0.distance(here).total_cmp(&run.points[b].0.distance(here))) {
-            g.cursor = best;
+            gait.speed = if g.finished { 0.0 } else { speed };
         }
         let ghost_index = run.points.partition_point(|q| q.1 <= t).clamp(1, run.points.len() - 1);
         g.gap_s = t - run.points[g.cursor].1;

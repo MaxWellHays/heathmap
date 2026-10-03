@@ -17,7 +17,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy_egui::input::EguiWantsInput;
 
-use crate::avatar::{FigureColors, Gait, spawn_figure};
+use crate::avatar::{FigureColors, Gait, RunnerAssets, spawn_figure};
 use crate::buildings::BuildingIndex;
 use crate::level::{Heightmap, Level, LevelState};
 use crate::landmarks::{Landmarks, deck_height};
@@ -197,8 +197,7 @@ fn view_from(focus: Vec3, yaw: f32, tilt: f32, distance: f32) -> Transform {
 fn spawn_player(
     mut commands: Commands,
     level: Res<Level>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    runner: Res<RunnerAssets>,
 ) {
     let player = commands
         .spawn((
@@ -209,7 +208,7 @@ fn spawn_player(
             Visibility::Hidden,
         ))
         .id();
-    spawn_figure(&mut commands, player, FigureColors::default(), &mut meshes, &mut materials);
+    spawn_figure(&mut commands, player, FigureColors::default(), &runner);
 }
 
 fn cursor_ray(window: &Window, camera: &Camera, cam_tf: &GlobalTransform) -> Option<Ray3d> {
