@@ -3,9 +3,9 @@
 //!   building) and keeps it under the cursor; right drag or Ctrl/Shift + left drag
 //!   orbits around that point (sideways rotates, up/down tilts); scroll zooms
 //!   smoothly towards the point under the cursor.
-//! 2 Walk: first person at eye height; WASD, Shift ×4.5, mouse looks.
+//! 2 Walk: first person at eye height; WASD, Shift ×4.5, Space jumps, mouse looks.
 //! 3 Third person: camera follows the player avatar; WASD moves relative to the
-//!   view, mouse orbits the camera around the player.
+//!   view, Space jumps, mouse orbits the camera around the player.
 //! 4 Fly: free flight; WASD, Space/C up/down, Shift ×4.5, scroll sets speed.
 //!
 //! Switching modes animates the camera between views. In modes that capture the
@@ -22,7 +22,9 @@ use crate::level::{Heightmap, Level, LevelState};
 use crate::pick::{PickGrid, raycast, terrain_hit};
 
 const EYE_HEIGHT: f32 = 1.7;
-const WALK_SPEED: f32 = 1.4; // m/s
+const WALK_SPEED: f32 = 2.2; // m/s (Shift: ×4.5 ≈ 10 m/s running)
+const JUMP_SPEED: f32 = 4.8; // m/s upwards at take-off (about a 1 m jump)
+const GRAVITY: f32 = 12.0; // m/s²; a little above real gravity for a snappier, game-like jump
 const SHIFT_MULTIPLIER: f32 = 4.5;
 const LOOK_SENSITIVITY: f32 = 0.0025; // radians per pixel
 const ORBIT_SENSITIVITY: f32 = 0.005;
@@ -69,6 +71,9 @@ pub struct ModeRequest(pub Option<CameraMode>);
 pub struct Player {
     /// Facing direction, radians (0 = north).
     pub heading: f32,
+    /// Vertical speed while jumping or falling (m/s); 0 on the ground.
+    pub vertical_speed: f32,
+    pub airborne: bool,
 }
 
 /// View angles for the first-person, third-person and fly cameras.
@@ -169,7 +174,7 @@ fn spawn_player(
     let skin = materials.add(StandardMaterial { base_color: Color::srgb(0.85, 0.68, 0.55), ..default() });
     commands
         .spawn((
-            Player { heading: 0.0 },
+            Player { heading: 0.0, vertical_speed: 0.0, airborne: false },
             Name::new("Player"),
             Transform::from_xyz(START.x, level.heightmap.sample(START.x, START.y), START.y),
             Visibility::Hidden,
@@ -419,7 +424,8 @@ fn boost(keys: &ButtonInput<KeyCode>) -> f32 {
     if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) { SHIFT_MULTIPLIER } else { 1.0 }
 }
 
-/// Moves the player relative to the view direction; the avatar turns to face where it walks.
+/// Moves the player relative to the view direction; the avatar turns to face where it
+/// walks. Space jumps; gravity brings the player back down onto the terrain.
 fn walk_player(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -434,8 +440,24 @@ fn walk_player(
         let diff = (target - player.heading + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
         player.heading += diff * (10.0 * time.delta_secs()).min(1.0);
     }
+    let dt = time.delta_secs();
+    if keys.just_pressed(KeyCode::Space) && !player.airborne {
+        player.vertical_speed = JUMP_SPEED;
+        player.airborne = true;
+    }
     let mut p = transform.translation + step;
-    p.y = hm.sample(p.x, p.z);
+    let ground = hm.sample(p.x, p.z);
+    if player.airborne {
+        player.vertical_speed -= GRAVITY * dt;
+        p.y += player.vertical_speed * dt;
+        if p.y <= ground {
+            p.y = ground;
+            player.vertical_speed = 0.0;
+            player.airborne = false;
+        }
+    } else {
+        p.y = ground;
+    }
     transform.translation = p;
     transform.rotation = Quat::from_rotation_y(player.heading);
 }

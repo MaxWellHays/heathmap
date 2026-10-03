@@ -49,7 +49,7 @@ def extract_footprints() -> list[dict]:
     min_e, min_n, max_e, max_n = BBOX_BNG
     subprocess.run([
         "ogr2ogr", "-f", "GeoJSON", str(out), str(RAW_DIR / "greater-london.osm.pbf"), "multipolygons",
-        "-where", "building IS NOT NULL",
+        "-where", "building IS NOT NULL AND building <> 'no'",  # building=no marks non-buildings (e.g. a barrow)
         "-t_srs", "EPSG:27700",
         "-spat", str(min_e), str(min_n), str(max_e), str(max_n), "-spat_srs", "EPSG:27700",
         "-clipdst", str(min_e), str(min_n), str(max_e), str(max_n),

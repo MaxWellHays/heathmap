@@ -46,6 +46,7 @@ pub struct LevelMeta {
     pub trees: FileMeta,
     pub buildings: FileMeta,
     pub lines: FileMeta,
+    pub water: FileMeta,
 }
 
 /// Raw bytes of a `.bin` file; decoded once all level files have arrived.
@@ -205,6 +206,7 @@ pub struct LevelHandles {
     pub buildings: Option<Handle<BinaryFile>>,
     pub lines: Option<Handle<BinaryFile>>,
     pub ground_sdf: Option<Handle<BinaryFile>>,
+    pub water: Option<Handle<BinaryFile>>,
 }
 
 /// The loaded level, available once `LevelState::Ready` is reached.
@@ -236,6 +238,7 @@ impl Plugin for LevelPlugin {
                     buildings: None,
                     lines: None,
                     ground_sdf: None,
+                    water: None,
                 });
             })
             .add_systems(Update, request_data.run_if(in_state(LevelState::LoadingMeta)))
@@ -256,6 +259,7 @@ fn request_data(
     handles.buildings = Some(assets.load(format!("{dir}/{}", meta.buildings.file)));
     handles.lines = Some(assets.load(format!("{dir}/{}", meta.lines.file)));
     handles.ground_sdf = Some(assets.load(format!("{dir}/{}", meta.ground_sdf.file)));
+    handles.water = Some(assets.load(format!("{dir}/{}", meta.water.file)));
     next.set(LevelState::LoadingData);
 }
 
@@ -275,7 +279,7 @@ fn finish_loading(
     };
     // Buildings and lines are decoded by their own plugins; just wait for them to arrive.
     let arrived = |h: &Option<Handle<BinaryFile>>| h.as_ref().is_some_and(|h| files.contains(h));
-    if !arrived(&handles.buildings) || !arrived(&handles.lines) || !arrived(&handles.ground_sdf) {
+    if ![&handles.buildings, &handles.lines, &handles.ground_sdf, &handles.water].into_iter().all(arrived) {
         return;
     }
     let heightmap = Heightmap::from_bytes(&meta.terrain, &meta.extent, &terrain.0);

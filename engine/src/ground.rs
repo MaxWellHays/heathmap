@@ -25,7 +25,7 @@ const CLASS_COLORS: [(&str, [f32; 3]); 12] = [
     ("cemetery", [0.66, 0.74, 0.60]),
     ("pitch", [0.66, 0.82, 0.54]),
     ("wetland", [0.61, 0.78, 0.71]),
-    ("water", [0.50, 0.70, 0.84]),
+    ("water", [0.16, 0.30, 0.36]), // same as the water surface, so their edges blend
     ("road", [0.62, 0.62, 0.63]),
     ("road_major", [0.58, 0.58, 0.60]),
 ];
@@ -37,6 +37,70 @@ pub struct GroundParams {
     pub colors: [Vec4; 13],
     /// Texel value steps per metre in the distance textures (x); rest unused.
     pub sdf_scale: Vec4,
+    /// x: elevation colours on (1/0), y: contours on, z: contour interval (m), w: every n-th line is major.
+    pub elevation: Vec4,
+    /// x, y: elevation range mapped onto the gradient (m), z: colour strength, w: contour strength.
+    pub elevation_range: Vec4,
+    /// Elevation gradient, low to high (linear RGBA), evenly spaced.
+    pub gradient: [Vec4; 5],
+}
+
+/// Same low-blue-to-high-red gradient as the v0 web map (sRGB).
+const GRADIENT: [[f32; 3]; 5] = [
+    [0.173, 0.482, 0.714],
+    [0.671, 0.851, 0.914],
+    [0.996, 0.878, 0.565],
+    [0.988, 0.553, 0.349],
+    [0.843, 0.098, 0.110],
+];
+/// Elevation range for the gradient (m): the Heath's lowest to highest contour, as in v0.
+pub const ELEVATION_RANGE: (f32, f32) = (24.0, 136.0);
+
+/// Elevation colour and contour settings shown in the panel.
+#[derive(Resource, Clone, PartialEq)]
+pub struct ElevationSettings {
+    pub colors: bool,
+    pub contours: bool,
+    pub contour_interval: f32,
+    pub major_every: f32,
+    pub color_strength: f32,
+    pub contour_strength: f32,
+}
+
+impl Default for ElevationSettings {
+    fn default() -> Self {
+        Self { colors: false, contours: false, contour_interval: 2.0, major_every: 5.0, color_strength: 0.55, contour_strength: 0.8 }
+    }
+}
+
+impl ElevationSettings {
+    fn uniforms(&self) -> (Vec4, Vec4) {
+        (
+            Vec4::new(self.colors as u8 as f32, self.contours as u8 as f32, self.contour_interval, self.major_every),
+            Vec4::new(ELEVATION_RANGE.0, ELEVATION_RANGE.1, self.color_strength, self.contour_strength),
+        )
+    }
+}
+
+/// The terrain's material, so settings changes can update it.
+#[derive(Resource)]
+pub struct GroundMaterialHandle(pub Handle<GroundMaterial>);
+
+/// Pushes panel changes to elevation colours / contours into the terrain material.
+pub fn apply_elevation_settings(
+    settings: Res<ElevationSettings>,
+    handle: Option<Res<GroundMaterialHandle>>,
+    mut materials: ResMut<Assets<GroundMaterial>>,
+) {
+    let Some(handle) = handle else { return };
+    if !settings.is_changed() && !handle.is_added() {
+        return;
+    }
+    if let Some(mut m) = materials.get_mut(&handle.0) {
+        let (elevation, range) = settings.uniforms();
+        m.extension.params.elevation = elevation;
+        m.extension.params.elevation_range = range;
+    }
 }
 
 #[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
@@ -92,8 +156,10 @@ pub fn ground_material(
             colors[i + 1] = linear(*c);
         }
     }
+    let (elevation, elevation_range) = ElevationSettings::default().uniforms();
+    let gradient = GRADIENT.map(linear);
     Some(GroundExtension {
-        params: GroundParams { colors, sdf_scale: Vec4::new(meta.scale, 0.0, 0.0, 0.0) },
+        params: GroundParams { colors, sdf_scale: Vec4::new(meta.scale, 0.0, 0.0, 0.0), elevation, elevation_range, gradient },
         sdf0,
         sdf1,
         sdf2,

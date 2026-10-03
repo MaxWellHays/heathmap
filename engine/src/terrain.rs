@@ -7,7 +7,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use crate::ground::{GroundMaterial, ground_material};
+use crate::ground::{ElevationSettings, GroundMaterial, GroundMaterialHandle, apply_elevation_settings, ground_material};
 use crate::level::{BinaryFile, Heightmap, Level, LevelHandles, LevelState};
 use crate::lod::LodChunk;
 
@@ -24,7 +24,9 @@ pub struct TerrainPlugin;
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<GroundMaterial>::default())
-            .add_systems(OnEnter(LevelState::Ready), spawn_terrain);
+            .init_resource::<ElevationSettings>()
+            .add_systems(OnEnter(LevelState::Ready), spawn_terrain)
+            .add_systems(Update, apply_elevation_settings);
     }
 }
 
@@ -46,6 +48,7 @@ fn spawn_terrain(
         base: StandardMaterial { perceptual_roughness: 1.0, reflectance: 0.1, ..default() },
         extension,
     });
+    commands.insert_resource(GroundMaterialHandle(material.clone()));
     let extent = &level.meta.extent;
     let uv_scale = Vec2::new(1.0 / (extent.x[1] - extent.x[0]), 1.0 / (extent.z[1] - extent.z[0]));
     let uv_origin = Vec2::new(extent.x[0], extent.z[0]);

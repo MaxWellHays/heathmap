@@ -65,6 +65,8 @@ impl Kind {
 struct Line {
     kind: Kind,
     oneway: bool,
+    /// OSM bridge=*: the LIDAR terrain has bridges removed, so the deck is built in the air.
+    bridge: bool,
     lanes: u8,
     width: f32,
     points: Vec<Vec2>,
@@ -78,7 +80,7 @@ fn decode_lines(bytes: &[u8]) -> Vec<Line> {
         let (kind, flags, lanes, width) = (r.u8(), r.u8(), r.u8(), r.f32());
         let points = (0..r.u32()).map(|_| Vec2::new(r.f32(), r.f32())).collect();
         if let Some(kind) = Kind::from_u8(kind) {
-            out.push(Line { kind, oneway: flags & 1 != 0, lanes, width, points });
+            out.push(Line { kind, oneway: flags & 1 != 0, bridge: flags & 2 != 0, lanes, width, points });
         }
     }
     out
@@ -104,7 +106,18 @@ enum Look {
     Paving,
     Gravel,
     Dirt,
+    /// 3D stair treads and risers.
     Stone,
+    /// 3D bridge structure: slab, parapets, piers.
+    Masonry,
+}
+
+impl Look {
+    /// Flat strips on the ground don't cast shadows (only a dark line along their edges);
+    /// stairs and bridges are real 3D shapes and do.
+    fn casts_shadows(self) -> bool {
+        matches!(self, Look::Stone | Look::Masonry)
+    }
 }
 
 fn look(line: &Line) -> Look {
@@ -130,7 +143,7 @@ fn spawn_lines(
     let lines = decode_lines(&file.0);
 
     let mut material_for = std::collections::HashMap::new();
-    for l in [Look::Asphalt, Look::CentreLine, Look::Paving, Look::Gravel, Look::Dirt, Look::Stone] {
+    for l in [Look::Asphalt, Look::CentreLine, Look::Paving, Look::Gravel, Look::Dirt, Look::Stone, Look::Masonry] {
         let image = images.add(texture(l));
         let m = materials.add(StandardMaterial {
             base_color_texture: Some(image),
@@ -138,6 +151,9 @@ fn spawn_lines(
             reflectance: 0.1,
             depth_bias: if l == Look::CentreLine { 60.0 } else { 50.0 },
             alpha_mode: if l == Look::CentreLine { AlphaMode::Mask(0.5) } else { AlphaMode::Opaque },
+            // Stairs and bridges are built face by face; drawing both sides keeps them solid.
+            double_sided: l.casts_shadows(),
+            cull_mode: if l.casts_shadows() { None } else { Some(bevy::render::render_resource::Face::Back) },
             ..default()
         });
         material_for.insert(l, m);
@@ -150,16 +166,35 @@ fn spawn_lines(
     for line in &lines {
         let Some(&first) = line.points.first() else { continue };
         let key = ((first.x / CHUNK).floor() as i32, (first.y / CHUNK).floor() as i32);
-        // Square caps (extending the ends by half the width) fill the wedges at road
-        // junctions, where overlapping asphalt looks seamless. Paths meet paths of other
-        // surfaces, so their caps would show as protruding rectangles.
         let lift = line.kind.lift();
-        let caps = look(line) == Look::Asphalt;
-        builders.entry((key, look(line))).or_default().add(&line.points, line.width, lift, line.kind.repeat(), caps, &heightmap);
+        let line_look = look(line);
+        if line.kind == Kind::Steps && !line.bridge {
+            builders.entry((key, Look::Stone)).or_default().stairs(&line.points, line.width, &heightmap);
+            continue;
+        }
+        // Bridges: a straight deck between the two ends (never below the terrain), plus structure.
+        let deck = line.bridge.then(|| {
+            let (a, b) = (line.points[0], *line.points.last().unwrap());
+            (heightmap.sample(a.x, a.y) + lift, heightmap.sample(b.x, b.y) + lift)
+        });
+        // Square caps (extending the ends by half the width) fill the wedges at road
+        // junctions, where overlapping asphalt looks seamless. Paths get round caps
+        // instead, so they join steps and paths of other surfaces without notches.
+        let caps = line_look == Look::Asphalt;
+        builders.entry((key, line_look)).or_default().add(&line.points, line.width, lift, line.kind.repeat(), caps, deck, &heightmap);
+        if !caps && !line.bridge {
+            let ribbons = builders.entry((key, line_look)).or_default();
+            for end in [line.points[0], *line.points.last().unwrap()] {
+                ribbons.disc(end, line.width / 2.0, lift, &heightmap);
+            }
+        }
+        if let Some((h0, h1)) = deck {
+            builders.entry((key, Look::Masonry)).or_default().bridge(&line.points, line.width, h0, h1, &heightmap);
+        }
         if has_centre_line(line) {
             let ribbons = builders.entry((key, Look::CentreLine)).or_default();
             for run in marking_runs(&line.points, &junctions) {
-                ribbons.add(&run, CENTRE_LINE_WIDTH, lift + 0.02, line.kind.repeat(), false, &heightmap);
+                ribbons.add(&run, CENTRE_LINE_WIDTH, lift + 0.02, line.kind.repeat(), false, None, &heightmap);
             }
         }
     }
@@ -173,10 +208,11 @@ fn spawn_lines(
     let mut per_chunk: std::collections::HashMap<(i32, i32), Vec<Entity>> = default();
     for ((key, l), ribbons) in builders {
         triangles += ribbons.indices.len() / 3;
-        // Flat decals on the ground: casting shadows would only draw a dark line along their edges.
-        let e = commands
-            .spawn((Mesh3d(meshes.add(ribbons.build())), MeshMaterial3d(material_for[&l].clone()), NotShadowCaster))
-            .id();
+        let mut e = commands.spawn((Mesh3d(meshes.add(ribbons.build())), MeshMaterial3d(material_for[&l].clone())));
+        if !l.casts_shadows() {
+            e.insert(NotShadowCaster);
+        }
+        let e = e.id();
         per_chunk.entry(key).or_default().push(e);
     }
     for ((cx, cz), entities) in per_chunk {
@@ -274,7 +310,10 @@ struct Ribbons {
 }
 
 impl Ribbons {
-    fn add(&mut self, points: &[Vec2], width: f32, lift: f32, repeat: f32, caps: bool, hm: &Heightmap) {
+    /// A strip along `points`. With `deck = Some((start, end))` its height runs straight
+    /// between those heights (bridges) instead of following the terrain.
+    #[allow(clippy::too_many_arguments)]
+    fn add(&mut self, points: &[Vec2], width: f32, lift: f32, repeat: f32, caps: bool, deck: Option<(f32, f32)>, hm: &Heightmap) {
         if points.len() < 2 {
             return;
         }
@@ -301,6 +340,11 @@ impl Ribbons {
             return;
         }
         let cols = ((width / ACROSS_SPACING).ceil() as usize + 1).max(2);
+        let total: f32 = pts.windows(2).map(|w| w[0].distance(w[1])).sum();
+        let height = |p: Vec2, along: f32| match deck {
+            Some((h0, h1)) => (h0 + (h1 - h0) * (along / total.max(1e-3))).max(hm.sample(p.x, p.y) + lift),
+            None => hm.sample(p.x, p.y) + lift,
+        };
         let start = self.positions.len() as u32;
         let mut along = 0.0;
         for i in 0..pts.len() {
@@ -319,7 +363,7 @@ impl Ribbons {
             for k in 0..cols {
                 let u = k as f32 / (cols - 1) as f32;
                 let p = pts[i] + normal * (half * mitre * (2.0 * u - 1.0));
-                self.positions.push([p.x, hm.sample(p.x, p.y) + lift, p.y]);
+                self.positions.push([p.x, height(p, along), p.y]);
                 self.normals.push([0.0, 1.0, 0.0]);
                 self.uvs.push([u, along / repeat]);
             }
@@ -374,6 +418,142 @@ impl Ribbons {
         }
     }
 
+    /// A quad a→b→c→d (counter-clockwise when seen from the side it faces), flat shaded,
+    /// with world-scale texture coordinates (one repeat per 2 m).
+    fn quad(&mut self, a: Vec3, b: Vec3, c: Vec3, d: Vec3) {
+        let n = (b - a).cross(d - a).normalize_or_zero();
+        if n == Vec3::ZERO {
+            return;
+        }
+        let i = self.positions.len() as u32;
+        let (w, h) = (a.distance(b) / 2.0, a.distance(d) / 2.0);
+        for (p, uv) in [(a, [0.0, 0.0]), (b, [w, 0.0]), (c, [w, h]), (d, [0.0, h])] {
+            self.positions.push(p.to_array());
+            self.normals.push(n.to_array());
+            self.uvs.push(uv);
+        }
+        self.indices.extend_from_slice(&[i, i + 1, i + 2, i, i + 2, i + 3]);
+    }
+
+    /// Box from its four bottom corners (counter-clockwise from above) up to `top`.
+    fn prism(&mut self, base: [Vec2; 4], bottom: f32, top: f32) {
+        let at = |p: Vec2, y: f32| Vec3::new(p.x, y, p.y);
+        // Make sure the corners run counter-clockwise when seen from above (+y; z points south).
+        let ccw = {
+            let mut a = 0.0;
+            for k in 0..4 {
+                a += base[k].perp_dot(base[(k + 1) % 4]);
+            }
+            a < 0.0
+        };
+        let c = if ccw { base } else { [base[3], base[2], base[1], base[0]] };
+        for k in 0..4 {
+            let (p, q) = (c[k], c[(k + 1) % 4]);
+            self.quad(at(q, bottom), at(p, bottom), at(p, top), at(q, top));
+        }
+        self.quad(at(c[0], top), at(c[3], top), at(c[2], top), at(c[1], top));
+    }
+
+    /// Stairs along a steps line: treads about 0.4 m deep, each step's top at the terrain
+    /// height rounded to 16 cm rises (so the steps follow the slope as it really is, with
+    /// landings where it flattens), each tread a box down into the ground.
+    fn stairs(&mut self, points: &[Vec2], width: f32, hm: &Heightmap) {
+        const RISE: f32 = 0.16;
+        const TREAD: f32 = 0.4;
+        let half = width.max(1.2) / 2.0;
+        let mut along = vec![0.0f32];
+        for w in points.windows(2) {
+            along.push(along.last().unwrap() + w[0].distance(w[1]));
+        }
+        let total = *along.last().unwrap();
+        if total < 0.5 {
+            return;
+        }
+        let point_at = |d: f32| {
+            let k = along.partition_point(|&a| a <= d).clamp(1, points.len() - 1);
+            let t = (d - along[k - 1]) / (along[k] - along[k - 1]).max(1e-6);
+            points[k - 1].lerp(points[k], t.clamp(0.0, 1.0))
+        };
+        let n = (total / TREAD).round().max(1.0) as usize;
+        let tread = total / n as f32;
+        let h0 = hm.sample(points[0].x, points[0].y);
+        for k in 0..n {
+            let (d0, d1) = (k as f32 * tread, (k + 1) as f32 * tread);
+            let (p0, p1) = (point_at(d0), point_at(d1));
+            let mid = point_at((d0 + d1) / 2.0);
+            let dir = (p1 - p0).normalize_or(Vec2::X);
+            let side = Vec2::new(-dir.y, dir.x) * half;
+            // Highest terrain under this tread (centre and both side edges), rounded up to a whole rise.
+            let ground_top = [mid, mid + side, mid - side, p0, p1].iter().map(|p| hm.sample(p.x, p.y)).fold(f32::MIN, f32::max);
+            let top = h0 + ((ground_top - h0) / RISE).ceil() * RISE + 0.04;
+            let ground = [p0, p1, p0 + side, p1 - side].iter().map(|p| hm.sample(p.x, p.y)).fold(f32::MAX, f32::min);
+            self.prism([p0 - side, p1 - side, p1 + side, p0 + side], ground - 0.4, top);
+        }
+    }
+
+    /// Bridge structure under a deck running straight from height `h0` to `h1`:
+    /// a slab, parapet walls and piers down to the ground.
+    fn bridge(&mut self, points: &[Vec2], width: f32, h0: f32, h1: f32, hm: &Heightmap) {
+        const SLAB: f32 = 0.7;
+        const PARAPET: f32 = 1.0;
+        const WALL: f32 = 0.35;
+        const PIER_SPACING: f32 = 9.0;
+        let half = width.max(2.0) / 2.0;
+        let total: f32 = points.windows(2).map(|w| w[0].distance(w[1])).sum();
+        let mut along = 0.0;
+        let mut next_pier = PIER_SPACING / 2.0;
+        for w in points.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let len = a.distance(b);
+            let n = (len / MAX_SEGMENT).ceil().max(1.0) as usize;
+            let dir = (b - a).normalize_or(Vec2::X);
+            let side = Vec2::new(-dir.y, dir.x);
+            for k in 0..n {
+                let (t0, t1) = (k as f32 / n as f32, (k + 1) as f32 / n as f32);
+                let (p0, p1) = (a.lerp(b, t0), a.lerp(b, t1));
+                let deck = |d: f32, p: Vec2| (h0 + (h1 - h0) * (d / total.max(1e-3))).max(hm.sample(p.x, p.y));
+                let (d0, d1) = (along + len * t0, along + len * t1);
+                let (y0, y1) = (deck(d0, p0), deck(d1, p1));
+                for s in [-1.0f32, 1.0] {
+                    // Parapet wall along this edge, from under the slab to above the deck.
+                    let (i0, i1) = (p0 + side * s * (half - WALL), p1 + side * s * (half - WALL));
+                    let (o0, o1) = (p0 + side * s * half, p1 + side * s * half);
+                    let bottom = y0.min(y1) - SLAB;
+                    let top0 = y0 + PARAPET;
+                    let top1 = y1 + PARAPET;
+                    let at = |p: Vec2, y: f32| Vec3::new(p.x, y, p.y);
+                    // Outer face, top, inner face (wound to face out / up / in for either side).
+                    let (oa, ob) = if s > 0.0 { (o1, o0) } else { (o0, o1) };
+                    let (ta, tb) = if s > 0.0 { (top1, top0) } else { (top0, top1) };
+                    self.quad(at(oa, bottom), at(ob, bottom), at(ob, tb), at(oa, ta));
+                    let (ia, ib) = if s > 0.0 { (i0, i1) } else { (i1, i0) };
+                    let (tia, tib) = if s > 0.0 { (top0, top1) } else { (top1, top0) };
+                    self.quad(at(ia, y0.min(y1)), at(ib, y0.min(y1)), at(ib, tib), at(ia, tia));
+                    let (q0, q1) = if s > 0.0 { (o0, o1) } else { (o1, o0) };
+                    let (r0, r1) = if s > 0.0 { (i0, i1) } else { (i1, i0) };
+                    let (y_a, y_b) = if s > 0.0 { (top0, top1) } else { (top1, top0) };
+                    self.quad(at(q0, y_a), at(q1, y_b), at(r1, y_b), at(r0, y_a));
+                }
+                // Slab underside, facing down.
+                let at = |p: Vec2, y: f32| Vec3::new(p.x, y, p.y);
+                let (l0, l1, r0, r1) = (p0 + side * half, p1 + side * half, p0 - side * half, p1 - side * half);
+                self.quad(at(r0, y0 - SLAB), at(r1, y1 - SLAB), at(l1, y1 - SLAB), at(l0, y0 - SLAB));
+                // Piers where the deck is well above the ground.
+                while next_pier <= d1 {
+                    let p = a.lerp(b, ((next_pier - along) / len).clamp(0.0, 1.0));
+                    let y = deck(next_pier, p);
+                    let ground = hm.sample(p.x, p.y);
+                    if y - SLAB - ground > 1.5 {
+                        let (f, s2) = (dir * 0.6, side * (half - 0.2));
+                        self.prism([p - f - s2, p + f - s2, p + f + s2, p - f + s2], ground - 1.0, y - SLAB);
+                    }
+                    next_pier += PIER_SPACING;
+                }
+            }
+            along += len;
+        }
+    }
+
     fn build(self) -> Mesh {
         Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
             .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
@@ -409,9 +589,16 @@ fn texture(look: Look) -> Image {
                 Look::Gravel => (0.62 + 0.12 * n, 0.56 + 0.12 * n, 0.46 + 0.10 * n),
                 Look::Dirt => (0.52 + 0.08 * n, 0.42 + 0.07 * n, 0.30 + 0.05 * n),
                 Look::Stone => {
-                    let step = (v * 8.0).fract() < 0.12;
-                    let s = if step { 0.50 } else { 0.66 + 0.04 * n };
+                    let s = 0.66 + 0.05 * n;
                     (s, s, s * 0.97)
+                }
+                Look::Masonry => {
+                    // Stone blocks: mortar lines every 1/4 vertically, staggered every 1/2 across.
+                    let row = (v * 4.0).floor();
+                    let offset = if row as i32 % 2 == 0 { 0.0 } else { 0.25 };
+                    let joint = (v * 4.0).fract() < 0.06 || ((u + offset) * 2.0).fract() < 0.03;
+                    let s = if joint { 0.55 } else { 0.72 + 0.06 * n };
+                    (s, s * 0.95, s * 0.86)
                 }
             };
             // Centre line: 6 m dash, 6 m gap (one repeat is 12 m).
@@ -421,5 +608,7 @@ fn texture(look: Look) -> Image {
             rgba[i..i + 4].copy_from_slice(&[to8(r), to8(g), to8(b), alpha]);
         }
     }
-    image_with_mips(W, H, rgba, TextureFormat::Rgba8UnormSrgb, ImageAddressMode::ClampToEdge, ImageAddressMode::Repeat)
+    // 3D surfaces use world-scale coordinates and tile both ways; strips repeat only along.
+    let address_u = if matches!(look, Look::Stone | Look::Masonry) { ImageAddressMode::Repeat } else { ImageAddressMode::ClampToEdge };
+    image_with_mips(W, H, rgba, TextureFormat::Rgba8UnormSrgb, address_u, ImageAddressMode::Repeat)
 }

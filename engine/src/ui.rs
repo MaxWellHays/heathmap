@@ -6,7 +6,9 @@ use bevy::prelude::*;
 use bevy::window::{CursorOptions, PrimaryWindow};
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
+use crate::bookmarks::Bookmarks;
 use crate::buildings::Buildings;
+use crate::ground::ElevationSettings;
 use crate::camera::{CameraMode, ModeRequest, cursor_captured};
 use crate::lines::Lines;
 use crate::trees::Trees;
@@ -65,6 +67,9 @@ fn panel(
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
     mut request: ResMut<ModeRequest>,
     mut layers: ResMut<LayerSettings>,
+    mut elevation: ResMut<ElevationSettings>,
+    mut bookmarks: ResMut<Bookmarks>,
+    mut bookmark_name: Local<String>,
     mut styled: Local<bool>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -110,6 +115,20 @@ fn panel(
             ui.checkbox(&mut layers.trees, "Trees  (T)");
             ui.checkbox(&mut layers.roads, "Roads and paths");
             ui.checkbox(&mut layers.shadows, "Shadows");
+            // Change detection on the settings resource should only fire on real edits.
+            let mut e = elevation.clone();
+            ui.checkbox(&mut e.colors, "Elevation colours");
+            if e.colors {
+                ui.add(egui::Slider::new(&mut e.color_strength, 0.1..=1.0).text("strength"));
+            }
+            ui.checkbox(&mut e.contours, "Contours");
+            if e.contours {
+                ui.add(egui::Slider::new(&mut e.contour_interval, 1.0..=10.0).step_by(1.0).text("every").suffix(" m"));
+                ui.add(egui::Slider::new(&mut e.contour_strength, 0.1..=1.0).text("strength"));
+            }
+            if e != *elevation {
+                *elevation = e;
+            }
             ui.separator();
 
             ui.label(egui::RichText::new("SUN").color(MUTED).small());
@@ -121,11 +140,39 @@ fn panel(
             ui.add(egui::Slider::new(&mut layers.sun_elevation, 3.0..=85.0).text("height").suffix("°"));
             ui.separator();
 
+            egui::CollapsingHeader::new(egui::RichText::new("Bookmarks").color(MUTED)).default_open(false).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut *bookmark_name).hint_text("name").desired_width(120.0));
+                    if ui.button("Save view").clicked() {
+                        bookmarks.save = Some(std::mem::take(&mut *bookmark_name));
+                    }
+                });
+                let mut goto = None;
+                let mut delete = None;
+                for (i, b) in bookmarks.list.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Go").clicked() {
+                            goto = Some(i);
+                        }
+                        if ui.small_button("✕").on_hover_text("Delete").clicked() {
+                            delete = Some(i);
+                        }
+                        ui.label(egui::RichText::new(format!("{}. {}", i + 1, b.name)).small());
+                    });
+                }
+                if goto.is_some() {
+                    bookmarks.goto = goto;
+                }
+                if delete.is_some() {
+                    bookmarks.delete = delete;
+                }
+            });
+
             egui::CollapsingHeader::new(egui::RichText::new("Controls").color(MUTED)).default_open(false).show(ui, |ui| {
                 let help = match current {
                     CameraMode::Map => "Drag: move the point you grabbed\nRight drag / Ctrl+drag: orbit around it\nScroll: zoom towards the cursor",
-                    CameraMode::Walk => "WASD: walk, Shift: run (×4.5)\nMouse: look around\nEsc: release the mouse",
-                    CameraMode::ThirdPerson => "WASD: walk, Shift: run (×4.5)\nMouse: orbit the camera\nEsc: release the mouse",
+                    CameraMode::Walk => "WASD: walk, Shift: run (×4.5), Space: jump\nMouse: look around\nEsc: release the mouse",
+                    CameraMode::ThirdPerson => "WASD: walk, Shift: run (×4.5), Space: jump\nMouse: orbit the camera\nEsc: release the mouse",
                     CameraMode::Fly => "WASD: fly, Space/C: up/down\nShift: ×4.5, scroll: speed\nMouse: look, Esc: release the mouse",
                 };
                 ui.label(egui::RichText::new(help).small());

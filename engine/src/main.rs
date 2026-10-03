@@ -15,6 +15,8 @@ mod terrain;
 mod textures;
 mod trees;
 mod ui;
+mod water;
+mod bookmarks;
 
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::light::{CascadeShadowConfig, CascadeShadowConfigBuilder, DirectionalLightShadowMap};
@@ -29,6 +31,8 @@ use pick::PickPlugin;
 use terrain::TerrainPlugin;
 use trees::TreesPlugin;
 use ui::{Sun, UiPlugin};
+use water::WaterPlugin;
+use bookmarks::BookmarksPlugin;
 
 fn main() {
     let mut app = App::new();
@@ -52,6 +56,8 @@ fn main() {
         PickPlugin,
         CameraPlugin,
         UiPlugin,
+        WaterPlugin,
+        BookmarksPlugin,
     ))
     .insert_resource(ClearColor(Color::srgb(0.78, 0.85, 0.92)))
     .insert_resource(GlobalAmbientLight { brightness: 450.0, ..default() })

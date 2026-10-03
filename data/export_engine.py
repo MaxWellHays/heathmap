@@ -12,6 +12,7 @@ Outputs in engine/assets/levels/heath/ (generated, not committed):
   trees.bin      f32 little-endian records: x, z, ground, height, crown_radius
   buildings.bin  footprints with LIDAR heights (engine builds walls and roofs)
   lines.bin      road and path centre lines (engine drapes them on the terrain)
+  water.bin      pond and lake outlines (engine builds flat water surfaces)
 """
 
 import csv
@@ -259,6 +260,37 @@ def export_buildings(meta: dict) -> None:
     print(f"  buildings: {count}")
 
 
+def export_water(meta: dict) -> None:
+    """Ponds, lakes and reservoirs; the engine builds flat water surfaces from them.
+
+    Format (little-endian): u32 count, then per polygon: u16 ring count, per ring:
+    u32 vertex count, vertex count × (f32 x, f32 z). Ring 0 is the outer ring.
+    """
+    polys = ogr_features("multipolygons", "natural = 'water' OR landuse = 'reservoir' OR other_tags LIKE '%\"water\"=>%'",
+                         "natural,landuse")
+    # Ponds are often mapped twice (a tagged way and a multipolygon relation, or water=*
+    # inside natural=water); merge overlaps so each water body becomes one surface.
+    from shapely.ops import unary_union
+    merged = unary_union([shape(f["geometry"]).buffer(0) for f in polys])
+    out = bytearray(struct.pack("<I", 0))
+    count = 0
+    for g in [merged]:
+        for poly in (g.geoms if g.geom_type == "MultiPolygon" else [g]):
+            if poly.area < 10:
+                continue
+            rings = [poly.exterior, *poly.interiors]
+            out += struct.pack("<H", len(rings))
+            for ring in rings:
+                pts = list(ring.coords)[:-1]
+                out += struct.pack("<I", len(pts))
+                out += struct.pack(f"<{2 * len(pts)}f", *(v for x, y in pts for v in to_local(x, y)))
+            count += 1
+    struct.pack_into("<I", out, 0, count)
+    (LEVEL_DIR / "water.bin").write_bytes(out)
+    meta["water"] = {"file": "water.bin", "count": count}
+    print(f"  water: {count} polygons")
+
+
 # Line kinds shared with the engine (engine/src/lines.rs).
 LINE_KINDS = {"road_major": 0, "road_minor": 1, "service": 2, "pedestrian": 3,
               "path_paved": 4, "path_unpaved": 5, "steps": 6, "track": 7}
@@ -336,6 +368,7 @@ def main() -> None:
     export_trees(meta)
     export_buildings(meta)
     export_lines(meta)
+    export_water(meta)
     (LEVEL_DIR / "level.json").write_text(json.dumps(meta, indent=2) + "\n")
     sizes = {p.name: f"{p.stat().st_size / 1e6:.1f} MB" for p in sorted(LEVEL_DIR.iterdir())}
     print(f"Wrote {LEVEL_DIR}: {sizes}")
