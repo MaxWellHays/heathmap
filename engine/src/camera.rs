@@ -110,6 +110,12 @@ struct MapInput {
 
 pub struct CameraPlugin;
 
+/// False while a text field (e.g. a bookmark name) has keyboard focus, so typing
+/// doesn't also move the camera or switch modes.
+pub fn keyboard_free(egui: Option<Res<EguiWantsInput>>) -> bool {
+    egui.is_none_or(|e| !e.wants_keyboard_input())
+}
+
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         let no_tween = |t: Res<CameraTween>| t.0.is_none();
@@ -118,17 +124,22 @@ impl Plugin for CameraPlugin {
             .init_resource::<CameraTween>()
             .add_systems(Startup, spawn_camera)
             .add_systems(OnEnter(LevelState::Ready), (place_on_level, spawn_player))
-            .add_systems(Update, (mode_keys, switch_mode).chain().run_if(in_state(LevelState::Ready)))
+            .add_systems(Update, (mode_keys.run_if(keyboard_free), switch_mode).chain().run_if(in_state(LevelState::Ready)))
             .add_systems(
                 Update,
                 (
                     map_controls.run_if(in_state(CameraMode::Map)),
-                    (look, walk_player.run_if(in_state(CameraMode::Walk).or_else(in_state(CameraMode::ThirdPerson))))
+                    (
+                        look,
+                        walk_player
+                            .run_if(in_state(CameraMode::Walk).or_else(in_state(CameraMode::ThirdPerson)))
+                            .run_if(keyboard_free),
+                    )
                         .chain()
                         .run_if(not(in_state(CameraMode::Map))),
                     follow_first_person.after(walk_player).run_if(in_state(CameraMode::Walk)),
                     follow_third_person.after(walk_player).run_if(in_state(CameraMode::ThirdPerson)),
-                    fly.after(look).run_if(in_state(CameraMode::Fly)),
+                    fly.after(look).run_if(in_state(CameraMode::Fly)).run_if(keyboard_free),
                 )
                     .after(switch_mode)
                     .run_if(in_state(LevelState::Ready).and_then(no_tween)),
@@ -514,8 +525,9 @@ fn cursor_capture(
 ) {
     let Ok(mut c) = cursor.single_mut() else { return };
     let captured = cursor_captured(&c);
-    let over_ui = egui.is_some_and(|e| e.wants_pointer_input() || e.is_pointer_over_area());
-    let want = if !mode.get().captures_cursor() || keys.just_pressed(KeyCode::Escape) {
+    let over_ui = egui.as_ref().is_some_and(|e| e.wants_pointer_input() || e.is_pointer_over_area());
+    let typing = egui.as_ref().is_some_and(|e| e.wants_keyboard_input());
+    let want = if !mode.get().captures_cursor() || (keys.just_pressed(KeyCode::Escape) && !typing) {
         false
     } else if mode.is_changed() || (buttons.just_pressed(MouseButton::Left) && !over_ui) {
         true

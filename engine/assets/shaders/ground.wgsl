@@ -1,6 +1,9 @@
 // Terrain colour from per-class signed distance fields (see src/ground.rs).
 // Each class is painted over the previous ones where its distance is negative,
 // anti-aliased over about one screen pixel, so edges stay sharp at any zoom.
+//
+// Heights and normals come from the full-resolution heightmap texture, so lighting,
+// contour lines and elevation colours agree whichever terrain LOD mesh is drawn.
 
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
@@ -19,14 +22,22 @@
 }
 #endif
 
+struct ElevationParams {
+    // x: elevation colours on, y: contours on, z: contour interval (m), w: major every n-th line
+    settings: vec4<f32>,
+    // x, y: elevation range (m), z: colour strength, w: contour strength
+    range: vec4<f32>,
+    gradient: array<vec4<f32>, 5>,
+}
+
 struct GroundParams {
     colors: array<vec4<f32>, 13>,
     sdf_scale: vec4<f32>,
-    // x: elevation colours on, y: contours on, z: contour interval (m), w: major every n-th line
-    elevation: vec4<f32>,
-    // x, y: elevation range (m), z: colour strength, w: contour strength
-    elevation_range: vec4<f32>,
-    gradient: array<vec4<f32>, 5>,
+    // x, y: world x/z of height sample (0, 0); z: metres per sample
+    height_grid: vec4<f32>,
+    // x, y: heightmap size in samples
+    height_size: vec4<f32>,
+    elevation: ElevationParams,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> ground: GroundParams;
@@ -34,6 +45,7 @@ struct GroundParams {
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var sdf_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(103) var sdf1: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(104) var sdf2: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(105) var height_tex: texture_2d<f32>;
 
 // Texture value (0..1) -> signed distance in metres (negative inside).
 fn metres(v: f32) -> f32 {
@@ -46,11 +58,42 @@ fn paint(color: vec3<f32>, d: f32, layer: vec3<f32>) -> vec3<f32> {
     return mix(color, layer, 1.0 - smoothstep(-w, w, d));
 }
 
+fn height_sample(c: vec2<i32>) -> f32 {
+    let size = vec2<i32>(ground.height_size.xy);
+    return textureLoad(height_tex, clamp(c, vec2<i32>(0), size - vec2<i32>(1)), 0).r;
+}
+
+// Terrain height at world (x, z), interpolated on the same triangles as the full-detail
+// mesh (cells split along their NE–SW diagonal), matching Heightmap::sample on the CPU.
+fn height_at(xz: vec2<f32>) -> f32 {
+    let g = (xz - ground.height_grid.xy) / ground.height_grid.z;
+    let f = clamp(g, vec2<f32>(0.0), ground.height_size.xy - vec2<f32>(1.001));
+    let c = vec2<i32>(floor(f));
+    let t = f - floor(f);
+    let a = height_sample(c);
+    let b = height_sample(c + vec2<i32>(1, 0));
+    let s = height_sample(c + vec2<i32>(0, 1));
+    if t.x + t.y <= 1.0 {
+        return a + (b - a) * t.x + (s - a) * t.y;
+    }
+    let d = height_sample(c + vec2<i32>(1, 1));
+    return d + (s - d) * (1.0 - t.x) + (b - d) * (1.0 - t.y);
+}
+
+fn normal_at(xz: vec2<f32>) -> vec3<f32> {
+    let r = ground.height_grid.z;
+    let l = height_at(xz - vec2<f32>(r, 0.0));
+    let rr = height_at(xz + vec2<f32>(r, 0.0));
+    let u = height_at(xz - vec2<f32>(0.0, r));
+    let d = height_at(xz + vec2<f32>(0.0, r));
+    return normalize(vec3<f32>(l - rr, 2.0 * r, u - d));
+}
+
 // Elevation gradient colour for t in 0..1 (five evenly spaced stops).
 fn gradient(t: f32) -> vec3<f32> {
     let x = clamp(t, 0.0, 1.0) * 4.0;
     let i = min(u32(x), 3u);
-    return mix(ground.gradient[i].rgb, ground.gradient[i + 1u].rgb, x - f32(i));
+    return mix(ground.elevation.gradient[i].rgb, ground.elevation.gradient[i + 1u].rgb, x - f32(i));
 }
 
 @fragment
@@ -74,23 +117,29 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     color = paint(color, metres(c.b), ground.colors[11].rgb);
     color = paint(color, metres(c.a), ground.colors[12].rgb);
 
-    // Elevation colours and contour lines (the v0 map's layers), from the surface height.
+    // Full-resolution height and normal at this pixel.
+    let xz = in.world_position.xz;
+    let e = height_at(xz);
+    let n = normal_at(xz);
+    pbr_input.N = n;
+    pbr_input.world_normal = n;
+
+    // Elevation colours and contour lines (the v0 map's layers).
     // Derivatives are taken unconditionally: they must stay in uniform control flow.
-    let e = in.world_position.y;
-    let t = (e - ground.elevation_range.x) / (ground.elevation_range.y - ground.elevation_range.x);
-    let tint = gradient(t);
-    let interval = max(ground.elevation.z, 0.1);
+    let el = ground.elevation;
+    let tint = gradient((e - el.range.x) / max(el.range.y - el.range.x, 0.1));
+    let interval = max(el.settings.z, 0.1);
     let metres_per_pixel = max(fwidth(e), 1e-4);
     let to_line = abs(fract(e / interval + 0.5) - 0.5) * interval; // metres to the nearest contour
     let index = round(e / interval);
-    let major = abs(index - ground.elevation.w * round(index / ground.elevation.w)) < 0.5;
+    let major = abs(index - el.settings.w * round(index / el.settings.w)) < 0.5;
     let half_width = select(0.5, 1.2, major); // in pixels
     let line = 1.0 - smoothstep(half_width, half_width + 1.0, to_line / metres_per_pixel);
-    if ground.elevation.x > 0.5 {
-        color = mix(color, tint, ground.elevation_range.z);
+    if el.settings.x > 0.5 {
+        color = mix(color, tint, el.range.z);
     }
-    if ground.elevation.y > 0.5 {
-        color = mix(color, tint * 0.45, line * ground.elevation_range.w);
+    if el.settings.y > 0.5 {
+        color = mix(color, tint * 0.45, line * el.range.w);
     }
     pbr_input.material.base_color = vec4<f32>(color, 1.0);
 

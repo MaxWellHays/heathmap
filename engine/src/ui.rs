@@ -9,7 +9,7 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use crate::bookmarks::Bookmarks;
 use crate::buildings::Buildings;
 use crate::ground::ElevationSettings;
-use crate::camera::{CameraMode, ModeRequest, cursor_captured};
+use crate::camera::{CameraMode, ModeRequest, cursor_captured, keyboard_free};
 use crate::lines::Lines;
 use crate::trees::Trees;
 
@@ -42,7 +42,7 @@ impl Plugin for UiPlugin {
         app.add_plugins(EguiPlugin::default())
             .init_resource::<LayerSettings>()
             .add_systems(EguiPrimaryContextPass, panel)
-            .add_systems(Update, (layer_keys, apply_layers).chain());
+            .add_systems(Update, (layer_keys.run_if(keyboard_free), apply_layers).chain());
     }
 }
 
@@ -120,6 +120,7 @@ fn panel(
             ui.checkbox(&mut e.colors, "Elevation colours");
             if e.colors {
                 ui.add(egui::Slider::new(&mut e.color_strength, 0.1..=1.0).text("strength"));
+                ui.checkbox(&mut e.auto_range, "Range from visible heights");
             }
             ui.checkbox(&mut e.contours, "Contours");
             if e.contours {

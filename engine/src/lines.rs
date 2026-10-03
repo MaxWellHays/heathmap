@@ -8,10 +8,14 @@ use bevy::asset::RenderAssetUsages;
 use bevy::light::NotShadowCaster;
 use bevy::image::ImageAddressMode;
 use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
+use bevy::render::render_resource::AsBindGroup;
+use bevy::shader::ShaderRef;
 use bevy::render::render_resource::TextureFormat;
 
 use crate::buildings::Reader;
+use crate::ground::{ElevationTargets, ElevationUniform};
 use crate::level::{BinaryFile, Heightmap, LevelHandles, LevelState};
 use crate::lod::LodChunk;
 use crate::textures::image_with_mips;
@@ -43,13 +47,20 @@ impl Kind {
         [RoadMajor, RoadMinor, Service, Pedestrian, PathPaved, PathUnpaved, Steps, Track].get(v as usize).copied()
     }
 
-    /// Height above the terrain; wider/more important lines sit on top at junctions.
+    /// Height above the terrain. Every surface gets its own height, so where strips of
+    /// different surfaces overlap (junctions, end caps) one always wins cleanly instead of
+    /// flickering; more important lines sit on top. The 1 cm steps are well within depth
+    /// buffer precision at viewing distances (reverse-Z float depth).
     fn lift(self) -> f32 {
         match self {
             Kind::RoadMajor => 0.24,
             Kind::RoadMinor => 0.22,
-            Kind::Service | Kind::Pedestrian => 0.20,
-            _ => 0.16,
+            Kind::Service => 0.21,
+            Kind::Pedestrian => 0.20,
+            Kind::PathPaved => 0.18,
+            Kind::Track => 0.17,
+            Kind::PathUnpaved => 0.16,
+            Kind::Steps => 0.15,
         }
     }
 
@@ -89,11 +100,27 @@ fn decode_lines(bytes: &[u8]) -> Vec<Line> {
 #[derive(Component)]
 pub struct Lines;
 
+/// Road and path material: standard textured surface plus optional elevation tint.
+pub type LinesMaterial = ExtendedMaterial<StandardMaterial, LineTint>;
+
+#[derive(Asset, AsBindGroup, TypePath, Debug, Clone, Default)]
+pub struct LineTint {
+    #[uniform(100)]
+    pub elevation: ElevationUniform,
+}
+
+impl MaterialExtension for LineTint {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/lines.wgsl".into()
+    }
+}
+
 pub struct LinesPlugin;
 
 impl Plugin for LinesPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(LevelState::Ready), spawn_lines);
+        app.add_plugins(MaterialPlugin::<LinesMaterial>::default())
+            .add_systems(OnEnter(LevelState::Ready), spawn_lines);
     }
 }
 
@@ -137,7 +164,8 @@ fn spawn_lines(
     heightmap: Res<Heightmap>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<LinesMaterial>>,
+    mut targets: ResMut<ElevationTargets>,
 ) {
     let Some(file) = handles.lines.as_ref().and_then(|h| files.get(h)) else { return };
     let lines = decode_lines(&file.0);
@@ -145,7 +173,7 @@ fn spawn_lines(
     let mut material_for = std::collections::HashMap::new();
     for l in [Look::Asphalt, Look::CentreLine, Look::Paving, Look::Gravel, Look::Dirt, Look::Stone, Look::Masonry] {
         let image = images.add(texture(l));
-        let m = materials.add(StandardMaterial {
+        let base = StandardMaterial {
             base_color_texture: Some(image),
             perceptual_roughness: 0.95,
             reflectance: 0.1,
@@ -155,11 +183,19 @@ fn spawn_lines(
             double_sided: l.casts_shadows(),
             cull_mode: if l.casts_shadows() { None } else { Some(bevy::render::render_resource::Face::Back) },
             ..default()
-        });
+        };
+        let m = materials.add(LinesMaterial { base, extension: LineTint::default() });
+        targets.lines.push(m.clone());
         material_for.insert(l, m);
     }
 
     let junctions = road_junctions(&lines);
+    // Where paths meet steps, the stairs themselves form the join; a round cap would cover the bottom step.
+    let step_ends: std::collections::HashSet<(i32, i32)> = lines
+        .iter()
+        .filter(|l| l.kind == Kind::Steps)
+        .flat_map(|l| [vertex_key(l.points[0]), vertex_key(*l.points.last().unwrap())])
+        .collect();
 
     // One mesh per (chunk, look).
     let mut builders: std::collections::HashMap<((i32, i32), Look), Ribbons> = default();
@@ -184,8 +220,18 @@ fn spawn_lines(
         builders.entry((key, line_look)).or_default().add(&line.points, line.width, lift, line.kind.repeat(), caps, deck, &heightmap);
         if !caps && !line.bridge {
             let ribbons = builders.entry((key, line_look)).or_default();
-            for end in [line.points[0], *line.points.last().unwrap()] {
-                ribbons.disc(end, line.width / 2.0, lift, &heightmap);
+            let n = line.points.len();
+            let length: f32 = line.points.windows(2).map(|w| w[0].distance(w[1])).sum();
+            let repeat = line.kind.repeat();
+            // (end point, direction the strip runs at that end, texture v there)
+            let ends = [
+                (line.points[0], line.points[1] - line.points[0], 0.0),
+                (line.points[n - 1], line.points[n - 1] - line.points[n - 2], length / repeat),
+            ];
+            for (end, dir, v0) in ends {
+                if !step_ends.contains(&vertex_key(end)) {
+                    ribbons.disc(end, line.width / 2.0, lift, &heightmap, dir, line.width, repeat, v0);
+                }
             }
         }
         if let Some((h0, h1)) = deck {
@@ -201,7 +247,7 @@ fn spawn_lines(
     // Round asphalt patches at junctions fill the slivers left between roads meeting at sharp angles.
     for (centre, width) in junctions.values() {
         let key = ((centre.x / CHUNK).floor() as i32, (centre.y / CHUNK).floor() as i32);
-        builders.entry((key, Look::Asphalt)).or_default().disc(*centre, width / 2.0, Kind::RoadMajor.lift(), &heightmap);
+        builders.entry((key, Look::Asphalt)).or_default().disc(*centre, width / 2.0, Kind::RoadMajor.lift(), &heightmap, Vec2::X, *width, Kind::RoadMajor.repeat(), 0.0);
     }
     let root = commands.spawn((Lines, Name::new("Roads and paths"), Transform::default(), Visibility::default())).id();
     let mut triangles = 0;
@@ -385,27 +431,30 @@ impl Ribbons {
         }
     }
 
-    /// A flat disc draped on the terrain (a fan of triangles facing up).
-    fn disc(&mut self, centre: Vec2, radius: f32, lift: f32, hm: &Heightmap) {
+    /// A flat disc draped on the terrain (a fan of triangles facing up), textured as a
+    /// continuation of a strip of `width` running along `dir` whose texture is at `v0` at
+    /// the centre — so a path's round end cap shows the path's own surface pattern.
+    #[allow(clippy::too_many_arguments)]
+    fn disc(&mut self, centre: Vec2, radius: f32, lift: f32, hm: &Heightmap, dir: Vec2, width: f32, repeat: f32, v0: f32) {
         const SIDES: usize = 16;
+        let dir = dir.normalize_or(Vec2::X);
+        let across = Vec2::new(-dir.y, dir.x);
+        let uv = |p: Vec2| {
+            let d = p - centre;
+            [(0.5 + d.dot(across) / width.max(0.1)).clamp(0.0, 1.0), v0 + d.dot(dir) / repeat]
+        };
         let start = self.positions.len() as u32;
-        self.positions.push([centre.x, hm.sample(centre.x, centre.y) + lift, centre.y]);
-        self.normals.push([0.0, 1.0, 0.0]);
-        self.uvs.push([0.5, 0.0]);
-        for k in 0..SIDES {
-            let a = k as f32 / SIDES as f32 * std::f32::consts::TAU;
-            let p = centre + Vec2::new(a.cos(), a.sin()) * radius;
-            self.positions.push([p.x, hm.sample(p.x, p.y) + lift, p.y]);
-            self.normals.push([0.0, 1.0, 0.0]);
-            self.uvs.push([0.5, 0.0]);
-        }
-        // Inner ring at half radius, so the disc follows the terrain rather than spanning it flat.
-        for k in 0..SIDES {
-            let a = k as f32 / SIDES as f32 * std::f32::consts::TAU;
-            let p = centre + Vec2::new(a.cos(), a.sin()) * radius * 0.5;
-            self.positions.push([p.x, hm.sample(p.x, p.y) + lift, p.y]);
-            self.normals.push([0.0, 1.0, 0.0]);
-            self.uvs.push([0.5, 0.0]);
+        let push = |p: Vec2, this: &mut Self| {
+            this.positions.push([p.x, hm.sample(p.x, p.y) + lift, p.y]);
+            this.normals.push([0.0, 1.0, 0.0]);
+            this.uvs.push(uv(p));
+        };
+        push(centre, self);
+        for ring in [1.0, 0.5] {
+            for k in 0..SIDES {
+                let a = k as f32 / SIDES as f32 * std::f32::consts::TAU;
+                push(centre + Vec2::new(a.cos(), a.sin()) * radius * ring, self);
+            }
         }
         let (outer, inner) = (start + 1, start + 1 + SIDES as u32);
         for k in 0..SIDES as u32 {

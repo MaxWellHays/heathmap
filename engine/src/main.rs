@@ -23,6 +23,7 @@ use bevy::light::{CascadeShadowConfig, CascadeShadowConfigBuilder, DirectionalLi
 use bevy::prelude::*;
 
 use buildings::BuildingsPlugin;
+use ground::GroundPlugin;
 use camera::CameraPlugin;
 use level::{Heightmap, LevelPlugin};
 use lines::LinesPlugin;
@@ -49,6 +50,7 @@ fn main() {
     .add_plugins((
         LevelPlugin { dir: "levels/heath" },
         LodPlugin,
+        GroundPlugin,
         TerrainPlugin,
         TreesPlugin,
         BuildingsPlugin,

@@ -7,7 +7,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use crate::ground::{ElevationSettings, GroundMaterial, GroundMaterialHandle, apply_elevation_settings, ground_material};
+use crate::ground::{GroundMaterial, GroundMaterialHandle, ground_material};
 use crate::level::{BinaryFile, Heightmap, Level, LevelHandles, LevelState};
 use crate::lod::LodChunk;
 
@@ -23,10 +23,7 @@ pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(MaterialPlugin::<GroundMaterial>::default())
-            .init_resource::<ElevationSettings>()
-            .add_systems(OnEnter(LevelState::Ready), spawn_terrain)
-            .add_systems(Update, apply_elevation_settings);
+        app.add_systems(OnEnter(LevelState::Ready), spawn_terrain);
     }
 }
 
