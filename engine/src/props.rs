@@ -32,13 +32,13 @@ impl Plugin for PropsPlugin {
     }
 }
 
-fn srgb(r: f32, g: f32, b: f32) -> [f32; 4] {
+pub fn srgb(r: f32, g: f32, b: f32) -> [f32; 4] {
     LinearRgba::from(Color::srgb(r, g, b)).to_f32_array()
 }
 
-/// Flat-shaded, vertex-coloured mesh builder.
+/// Flat-shaded, vertex-coloured mesh builder (also used by landmark generators).
 #[derive(Default)]
-struct Shapes {
+pub struct Shapes {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     colors: Vec<[f32; 4]>,
@@ -46,7 +46,7 @@ struct Shapes {
 }
 
 impl Shapes {
-    fn quad(&mut self, a: Vec3, b: Vec3, c: Vec3, d: Vec3, color: [f32; 4]) {
+    pub fn quad(&mut self, a: Vec3, b: Vec3, c: Vec3, d: Vec3, color: [f32; 4]) {
         let n = (b - a).cross(d - a).normalize_or_zero();
         let i = self.positions.len() as u32;
         for p in [a, b, c, d] {
@@ -58,7 +58,7 @@ impl Shapes {
     }
 
     /// Axis-aligned box in the prop's own frame, placed by `tf` (position + yaw).
-    fn cuboid(&mut self, tf: &Transform, center: Vec3, half: Vec3, color: [f32; 4]) {
+    pub fn cuboid(&mut self, tf: &Transform, center: Vec3, half: Vec3, color: [f32; 4]) {
         let corner = |sx: f32, sy: f32, sz: f32| tf.transform_point(center + half * Vec3::new(sx, sy, sz));
         let faces = [
             ([1.0, -1.0, -1.0], [1.0, -1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, -1.0]),     // +x
@@ -74,7 +74,18 @@ impl Shapes {
         }
     }
 
-    fn build(self) -> Mesh {
+    pub fn triangle(&mut self, a: Vec3, b: Vec3, c: Vec3, color: [f32; 4]) {
+        let n = (b - a).cross(c - a).normalize_or_zero();
+        let i = self.positions.len() as u32;
+        for p in [a, b, c] {
+            self.positions.push(p.to_array());
+            self.normals.push(n.to_array());
+            self.colors.push(color);
+        }
+        self.indices.extend_from_slice(&[i, i + 1, i + 2]);
+    }
+
+    pub fn build(self) -> Mesh {
         Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
             .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
             .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals)
@@ -198,7 +209,7 @@ fn add_prop(s: &mut Shapes, p: &Prop, hm: &Heightmap) {
 /// Zebra crossing: white bars across the road (each bar runs along the traffic, 3 m long,
 /// 0.5 m wide, 0.5 m apart), draped just above the asphalt, plus a Belisha beacon at each end.
 fn add_crossing(s: &mut Shapes, p: &Prop, hm: &Heightmap) {
-    const LIFT: f32 = 0.26; // above the highest road surface
+    const LIFT: f32 = 0.14; // just above the highest road surface
     let along = Vec2::new(-p.yaw.sin(), -p.yaw.cos()); // road direction
     let across = Vec2::new(-along.y, along.x);
     let length = p.size.max(4.0);

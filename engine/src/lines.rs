@@ -17,12 +17,14 @@ use bevy::render::render_resource::TextureFormat;
 use crate::buildings::Reader;
 use crate::ground::{ElevationTargets, ElevationUniform, HeightTexture, create_height_texture};
 use crate::level::{BinaryFile, Heightmap, LevelHandles, LevelState};
+use crate::landmarks::{Landmarks, deck_height, load_landmarks};
 use crate::lod::LodChunk;
 use crate::textures::image_with_mips;
 
 const CHUNK: f32 = 512.0;
 const MAX_SEGMENT: f32 = 2.0; // m; ribbons are resampled this finely along their length…
 const ACROSS_SPACING: f32 = 1.5; // m; …and across their width, to follow the terrain
+const SKIRT_DEPTH: f32 = 0.3; // m below the terrain that strip edges reach
 const DRAW_DISTANCE: [f32; 1] = [3000.0];
 const CENTRE_LINE_WIDTH: f32 = 0.15;
 /// Centre lines stop this far from junctions, as painted lines do.
@@ -50,17 +52,19 @@ impl Kind {
     /// Height above the terrain. Every surface gets its own height, so where strips of
     /// different surfaces overlap (junctions, end caps) one always wins cleanly instead of
     /// flickering; more important lines sit on top. The 1 cm steps are well within depth
-    /// buffer precision at viewing distances (reverse-Z float depth).
+    /// buffer precision at viewing distances (reverse-Z float depth). Strips follow the
+    /// terrain closely (vertices every 1.5–2 m) and have skirts down into the ground, so
+    /// the lift can stay small without the terrain showing through or a gap showing below.
     fn lift(self) -> f32 {
         match self {
-            Kind::RoadMajor => 0.24,
-            Kind::RoadMinor => 0.22,
-            Kind::Service => 0.21,
-            Kind::Pedestrian => 0.20,
-            Kind::PathPaved => 0.18,
-            Kind::Track => 0.17,
-            Kind::PathUnpaved => 0.16,
-            Kind::Steps => 0.15,
+            Kind::RoadMajor => 0.12,
+            Kind::RoadMinor => 0.11,
+            Kind::Service => 0.10,
+            Kind::Pedestrian => 0.09,
+            Kind::PathPaved => 0.08,
+            Kind::Track => 0.07,
+            Kind::PathUnpaved => 0.06,
+            Kind::Steps => 0.05,
         }
     }
 
@@ -162,7 +166,7 @@ impl Plugin for LinesPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<LinesMaterial>::default())
             .init_resource::<BridgeDecks>()
-            .add_systems(OnEnter(LevelState::Ready), spawn_lines.after(create_height_texture));
+            .add_systems(OnEnter(LevelState::Ready), spawn_lines.after(create_height_texture).after(load_landmarks));
     }
 }
 
@@ -210,6 +214,7 @@ fn spawn_lines(
     mut targets: ResMut<ElevationTargets>,
     height: Res<HeightTexture>,
     mut decks: ResMut<BridgeDecks>,
+    landmarks: Res<Landmarks>,
 ) {
     let Some(file) = handles.lines.as_ref().and_then(|h| files.get(h)) else { return };
     let lines = decode_lines(&file.0);
@@ -250,6 +255,15 @@ fn spawn_lines(
             *w = w.max(l.width);
         }
     }
+    // Widest non-step line *ending* at each vertex: where a path ends at the stairs they
+    // meet end to end, joined by a round landing.
+    let mut end_width: std::collections::HashMap<(i32, i32), f32> = default();
+    for l in lines.iter().filter(|l| l.kind != Kind::Steps) {
+        for p in [l.points[0], *l.points.last().unwrap()] {
+            let w = end_width.entry(vertex_key(p)).or_default();
+            *w = w.max(l.width);
+        }
+    }
     // Where paths meet steps, the stairs themselves form the join; a round cap would cover the bottom step.
     let step_ends: std::collections::HashSet<(i32, i32)> = lines
         .iter()
@@ -266,21 +280,35 @@ fn spawn_lines(
         let line_look = look(line);
         if line.kind == Kind::Steps && !line.bridge {
             let trim = |p: &Vec2| width_at.get(&vertex_key(*p)).map_or(0.0, |w| w / 2.0);
+            let pad = |p: &Vec2| {
+                (width_at.get(&vertex_key(*p)).is_none())
+                    .then(|| end_width.get(&vertex_key(*p)).map(|w| w.max(line.width.max(1.2)) / 2.0 + 0.15))
+                    .flatten()
+            };
+            let pads = [pad(&line.points[0]), pad(line.points.last().unwrap())];
             let points = trim_polyline(&line.points, trim(&line.points[0]), trim(line.points.last().unwrap()));
-            builders.entry((key, Look::Stone)).or_default().stairs(&points, line.width, &heightmap);
+            builders.entry((key, Look::Stone)).or_default().stairs(&points, line.width, &heightmap, pads);
             continue;
         }
-        // Bridges: a straight deck between the two ends (never below the terrain), plus structure.
-        let deck = line.bridge.then(|| {
+        // Paths on a landmark terrace (the pergola) follow its deck; bridges get a straight
+        // deck between their two ends (never below the terrain), plus structure.
+        let mid = line.points[line.points.len() / 2];
+        let on_terrace = landmarks.pergola_at(mid).is_some();
+        let deck = (line.bridge && !on_terrace).then(|| {
             let (a, b) = (line.points[0], *line.points.last().unwrap());
             (heightmap.sample(a.x, a.y) + lift, heightmap.sample(b.x, b.y) + lift)
         });
+        let profile = match deck {
+            Some((h0, h1)) => Profile::Straight(h0, h1),
+            None if on_terrace => Profile::Deck,
+            None => Profile::Terrain,
+        };
         // Square caps (extending the ends by half the width) fill the wedges at road
         // junctions, where overlapping asphalt looks seamless. Paths get round caps
         // instead, so they join steps and paths of other surfaces without notches.
         let caps = line_look == Look::Asphalt;
-        builders.entry((key, line_look)).or_default().add(&line.points, line.width, lift, line.kind.repeat(), caps, deck, &heightmap);
-        if !caps && !line.bridge {
+        builders.entry((key, line_look)).or_default().add(&line.points, line.width, lift, line.kind.repeat(), caps, profile, &heightmap);
+        if !caps && !line.bridge && !on_terrace {
             let ribbons = builders.entry((key, line_look)).or_default();
             let n = line.points.len();
             let length: f32 = line.points.windows(2).map(|w| w[0].distance(w[1])).sum();
@@ -291,9 +319,9 @@ fn spawn_lines(
                 (line.points[n - 1], line.points[n - 1] - line.points[n - 2], length / repeat),
             ];
             for (end, dir, v0) in ends {
-                if !step_ends.contains(&vertex_key(end)) {
-                    ribbons.disc(end, line.width / 2.0, lift, &heightmap, dir, line.width, repeat, v0);
-                }
+                // At stairs, the cap is a little wider so it covers the joint whatever the angle.
+                let radius = if step_ends.contains(&vertex_key(end)) { line.width.max(1.2) / 2.0 + 0.3 } else { line.width / 2.0 };
+                ribbons.disc(end, radius, lift, &heightmap, dir, line.width, repeat, v0);
             }
         }
         if let Some((h0, h1)) = deck {
@@ -304,7 +332,7 @@ fn spawn_lines(
         if has_centre_line(line) {
             let ribbons = builders.entry((key, Look::CentreLine)).or_default();
             for run in marking_runs(&line.points, &junctions) {
-                ribbons.add(&run, CENTRE_LINE_WIDTH, lift + 0.02, line.kind.repeat(), false, None, &heightmap);
+                ribbons.add(&run, CENTRE_LINE_WIDTH, lift + 0.02, line.kind.repeat(), false, Profile::Terrain, &heightmap);
             }
         }
     }
@@ -440,6 +468,17 @@ fn marking_runs(points: &[Vec2], junctions: &std::collections::HashMap<(i32, i32
         .collect()
 }
 
+/// How a strip's height is found.
+#[derive(Clone, Copy)]
+enum Profile {
+    /// Draped on the terrain.
+    Terrain,
+    /// A straight bridge deck from the first height to the second.
+    Straight(f32, f32),
+    /// On a landmark terrace (the pergola deck).
+    Deck,
+}
+
 #[derive(Default)]
 struct Ribbons {
     positions: Vec<[f32; 3]>,
@@ -451,10 +490,12 @@ struct Ribbons {
 }
 
 impl Ribbons {
-    /// A strip along `points`. With `deck = Some((start, end))` its height runs straight
-    /// between those heights (bridges) instead of following the terrain.
+    /// A strip along `points`, following the terrain, a straight bridge deck, or a
+    /// landmark terrace deck (see `Profile`).
     #[allow(clippy::too_many_arguments)]
-    fn add(&mut self, points: &[Vec2], width: f32, lift: f32, repeat: f32, caps: bool, deck: Option<(f32, f32)>, hm: &Heightmap) {
+    fn add(&mut self, points: &[Vec2], width: f32, lift: f32, repeat: f32, caps: bool, profile: Profile, hm: &Heightmap) {
+        // Not for bridge decks (in the air) or centre lines.
+        let skirts = !matches!(profile, Profile::Straight(..)) && width > 0.5;
         if points.len() < 2 {
             return;
         }
@@ -482,9 +523,10 @@ impl Ribbons {
         }
         let cols = ((width / ACROSS_SPACING).ceil() as usize + 1).max(2);
         let total: f32 = pts.windows(2).map(|w| w[0].distance(w[1])).sum();
-        let height = |p: Vec2, along: f32| match deck {
-            Some((h0, h1)) => (h0 + (h1 - h0) * (along / total.max(1e-3))).max(hm.sample(p.x, p.y) + lift),
-            None => hm.sample(p.x, p.y) + lift,
+        let height = |p: Vec2, along: f32| match profile {
+            Profile::Straight(h0, h1) => (h0 + (h1 - h0) * (along / total.max(1e-3))).max(hm.sample(p.x, p.y) + lift),
+            Profile::Deck => deck_height(hm, p) + lift,
+            Profile::Terrain => hm.sample(p.x, p.y) + lift,
         };
         let start = self.positions.len() as u32;
         let mut along = 0.0;
@@ -509,7 +551,29 @@ impl Ribbons {
                 self.uvs.push([u, along / repeat]);
             }
         }
+        // Skirts: both long edges continue straight down into the ground, so the small lift
+        // never shows as a gap (or a dark seam) between the strip and the terrain.
+        let rows = pts.len() as u32;
         let cols32 = cols as u32;
+        if skirts {
+            for edge_col in [0, cols32 - 1] {
+                let base = self.positions.len() as u32;
+                for i in 0..rows {
+                    let top = self.positions[(start + i * cols32 + edge_col) as usize];
+                    let uv = self.uvs[(start + i * cols32 + edge_col) as usize];
+                    self.positions.push([top[0], top[1] - lift - SKIRT_DEPTH, top[2]]);
+                    self.normals.push([0.0, 1.0, 0.0]);
+                    self.uvs.push(uv);
+                }
+                for i in 0..rows - 1 {
+                    let (t0, t1) = (start + i * cols32 + edge_col, start + (i + 1) * cols32 + edge_col);
+                    let (b0, b1) = (base + i, base + i + 1);
+                    // Both windings: skirts are seen from outside only, but which side is
+                    // "outside" depends on the line's direction; two triangles each way is cheap.
+                    self.indices.extend_from_slice(&[t0, b0, t1, t1, b0, b1, t0, t1, b0, t1, b1, b0]);
+                }
+            }
+        }
         for i in 0..pts.len() as u32 - 1 {
             for k in 0..cols32 - 1 {
                 let (l0, r0) = (start + i * cols32 + k, start + i * cols32 + k + 1);
@@ -606,7 +670,7 @@ impl Ribbons {
     /// height rounded to 16 cm rises (so the steps follow the slope as it really is, with
     /// landings where it flattens), each tread a box down into the ground. A short landing
     /// at each end overlaps the connecting path, so stairs and paths join without gaps.
-    fn stairs(&mut self, points: &[Vec2], width: f32, hm: &Heightmap) {
+    fn stairs(&mut self, points: &[Vec2], width: f32, hm: &Heightmap, pads: [Option<f32>; 2]) {
         const RISE: f32 = 0.16;
         const TREAD: f32 = 0.4;
         const LANDING: f32 = 0.6;
@@ -645,9 +709,16 @@ impl Ribbons {
         let h0 = hm.sample(points[0].x, points[0].y);
         let n = (total / TREAD).round().max(1.0) as usize;
         let tread = total / n as f32;
-        let mut treads: Vec<(f32, f32, bool)> = vec![(-LANDING, 0.0, true)];
+        let mut treads: Vec<(f32, f32, bool)> = Vec::new();
+        if pads[0].is_none() {
+            treads.push((-LANDING, 0.0, true));
+        }
         treads.extend((0..n).map(|k| (k as f32 * tread, (k + 1) as f32 * tread, false)));
-        treads.push((total, total + LANDING, true));
+        if pads[1].is_none() {
+            treads.push((total, total + LANDING, true));
+        }
+        // Where a path ends at the stairs, the path's own round end cap (drawn with the
+        // path) fills the join at any angle; the stairs start on top of it.
         for (d0, d1, landing) in treads {
             let (p0, p1) = (point_at(d0), point_at(d1));
             let mid = point_at((d0 + d1) / 2.0);
@@ -657,8 +728,13 @@ impl Ribbons {
             let (q0, q1) = (mid - dir * (d1 - d0) / 2.0, mid + dir * (d1 - d0) / 2.0);
             // Highest terrain under this tread (centre and both side edges), rounded up to a whole rise.
             let ground_top = [mid, mid + side, mid - side, p0, p1].iter().map(|p| hm.sample(p.x, p.y)).fold(f32::MIN, f32::max);
-            // Landings sit flush with the path surface they join (paths float ~0.16 m up).
-            let top = if landing { ground_top + 0.19 } else { h0 + ((ground_top - h0) / RISE).ceil() * RISE + 0.04 };
+            // Landings sit flush with the path surface they join (paths float ~0.06–0.08 m up).
+            let top = if landing {
+                ground_top + 0.09
+            } else {
+                // Always clear of path surfaces and end caps (~0.06–0.08 m up).
+                (h0 + ((ground_top - h0) / RISE).ceil() * RISE + 0.04).max(ground_top + 0.11)
+            };
             let ground = [p0, p1, p0 + side, p1 - side].iter().map(|p| hm.sample(p.x, p.y)).fold(f32::MAX, f32::min);
             self.prism([q0 - side, q1 - side, q1 + side, q0 + side], ground - 0.4, top);
         }

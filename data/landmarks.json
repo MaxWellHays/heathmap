@@ -1,0 +1,8 @@
+[
+  {
+    "osm_id": "way/1337350988",
+    "name": "Hampstead Pergola",
+    "generator": "pergola",
+    "note": "Raised Edwardian terrace walk: the LIDAR terrain already includes the terrace; the engine builds the deck, retaining walls, columns, beams and vines instead of a solid building."
+  }
+]

@@ -7,6 +7,7 @@
 mod buildings;
 mod camera;
 mod ground;
+mod landmarks;
 mod level;
 mod lines;
 mod lod;
@@ -26,6 +27,7 @@ use bevy::prelude::*;
 use buildings::BuildingsPlugin;
 use ground::GroundPlugin;
 use camera::CameraPlugin;
+use landmarks::LandmarksPlugin;
 use level::{Heightmap, LevelPlugin};
 use lines::LinesPlugin;
 use lod::LodPlugin;
@@ -62,6 +64,7 @@ fn main() {
         UiPlugin,
         WaterPlugin,
         PropsPlugin,
+        LandmarksPlugin,
         BookmarksPlugin,
     ))
     .insert_resource(ClearColor(Color::srgb(0.78, 0.85, 0.92)))
@@ -80,7 +83,7 @@ fn main() {
 fn spawn_sun(mut commands: Commands) {
     commands.spawn((
         Sun,
-        DirectionalLight { illuminance: 9_000.0, shadow_maps_enabled: true, contact_shadows_enabled: true, ..default() },
+        DirectionalLight { illuminance: 9_000.0, shadow_maps_enabled: true, ..default() },
         Transform::default(),
         shadow_cascades(1000.0),
     ));
@@ -101,17 +104,11 @@ fn shadow_cascades(max_distance: f32) -> CascadeShadowConfig {
 fn fit_shadows_to_view(
     camera: Query<&Transform, With<Camera3d>>,
     heightmap: Option<Res<Heightmap>>,
-    mut sun: Query<(&mut CascadeShadowConfig, &mut DirectionalLight), With<Sun>>,
+    mut sun: Query<&mut CascadeShadowConfig, With<Sun>>,
     mut current: Local<f32>,
 ) {
-    let (Ok(cam), Some(hm), Ok((mut cascades, mut light))) = (camera.single(), heightmap, sun.single_mut()) else { return };
+    let (Ok(cam), Some(hm), Ok(mut cascades)) = (camera.single(), heightmap, sun.single_mut()) else { return };
     let altitude = (cam.translation.y - hm.sample(cam.translation.x, cam.translation.z)).max(1.7);
-    // Contact shadows add small-scale detail close up (steps, kerbs) but speckle distant
-    // tree crowns and roofs, so only use them near the ground.
-    let contact = altitude < 60.0;
-    if light.contact_shadows_enabled != contact {
-        light.contact_shadows_enabled = contact;
-    }
     let wanted = (altitude * 4.0).clamp(150.0, 6000.0);
     // Rebuild only on meaningful changes (cascade splits are recomputed from scratch).
     if (wanted / current.max(1.0) - 1.0).abs() > 0.15 {

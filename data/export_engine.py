@@ -278,6 +278,11 @@ def export_trees(meta: dict) -> None:
     print(f"  trees: {len(rows)}")
 
 
+LANDMARKS = json.loads((ROOT / "landmarks.json").read_text())
+LANDMARK_IDS = {lm["osm_id"] for lm in LANDMARKS}
+LANDMARK_GENERATORS = {"pergola": 0}
+
+
 def export_buildings(meta: dict) -> None:
     """Footprints with LIDAR heights; the engine extrudes walls and builds roofs.
 
@@ -290,6 +295,8 @@ def export_buildings(meta: dict) -> None:
     count = 0
     for f in features:
         p = f["properties"]
+        if p.get("osm_id") in LANDMARK_IDS:
+            continue  # built by its own generator (export_landmarks)
         g = shape(f["geometry"])
         for poly in (g.geoms if g.geom_type == "MultiPolygon" else [g]):
             if poly.area < 4:
@@ -336,6 +343,45 @@ def export_water(meta: dict) -> None:
     (LEVEL_DIR / "water.bin").write_bytes(out)
     meta["water"] = {"file": "water.bin", "count": count}
     print(f"  water: {count} polygons")
+
+
+def export_landmarks(meta: dict) -> None:
+    """Landmarks with their own generators (data/landmarks.json), e.g. the Hampstead Pergola.
+
+    Format (little-endian): u32 count, then per landmark: u8 generator, outline (u32 vertex
+    count + (f32 x, f32 z) each), u16 walkway count, per walkway: u32 vertex count + vertices.
+    Walkways are the footpaths inside the outline (clipped), along which columns are placed.
+    """
+    from shapely.geometry import LineString
+    buildings = {f["properties"]["osm_id"]: f for f in json.loads((BUILD_DIR / "buildings.geojson").read_text())["features"]}
+    paths = [shape(f["geometry"]) for f in ogr_features("lines", "highway IS NOT NULL", "highway,other_tags")
+             if f["properties"]["highway"] in PATH_HIGHWAYS - {"steps"} | {"pedestrian"}]
+    out = bytearray(struct.pack("<I", 0))
+    count = 0
+    for lm in LANDMARKS:
+        f = buildings.get(lm["osm_id"])
+        if f is None:
+            print(f"    landmark {lm['name']} not found in buildings")
+            continue
+        g = shape(f["geometry"])
+        poly = max(g.geoms, key=lambda q: q.area) if g.geom_type == "MultiPolygon" else g
+        ring = list(poly.exterior.coords)[:-1]
+        walks = []
+        for line in paths:
+            inside = line.intersection(poly)
+            for part in getattr(inside, "geoms", [inside]):
+                if isinstance(part, LineString) and part.length > 3:
+                    walks.append(list(part.coords))
+        out += struct.pack("<BI", LANDMARK_GENERATORS[lm["generator"]], len(ring))
+        out += struct.pack(f"<{2 * len(ring)}f", *(v for x, y in ring for v in to_local(x, y)))
+        out += struct.pack("<H", len(walks))
+        for w in walks:
+            out += struct.pack("<I", len(w)) + struct.pack(f"<{2 * len(w)}f", *(v for x, y in w for v in to_local(x, y)))
+        count += 1
+        print(f"    {lm['name']}: {len(ring)} outline vertices, {len(walks)} walkways")
+    struct.pack_into("<I", out, 0, count)
+    (LEVEL_DIR / "landmarks.bin").write_bytes(out)
+    meta["landmarks"] = {"file": "landmarks.bin", "count": count}
 
 
 # Prop kinds shared with the engine (engine/src/props.rs).
@@ -563,6 +609,7 @@ def main() -> None:
     export_ground_sdf(meta)
     export_trees(meta)
     export_buildings(meta)
+    export_landmarks(meta)
     export_lines(meta)
     export_water(meta)
     export_props(meta)
