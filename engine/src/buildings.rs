@@ -324,6 +324,8 @@ fn add_flat_roof(mb: &mut MeshBuilder, rings: &[Vec<Vec2>], top: f32, color: [f3
 
 /// Walls along every ring edge, from `base` up to `top_at(p)`. With a roof, edges are
 /// split where they cross roof creases so wall tops follow the roof exactly.
+/// Each wall faces away from the building: a point just outside it must not be inside
+/// the footprint (outer ring minus courtyards), whatever the rings' winding.
 fn add_walls(
     mb: &mut MeshBuilder,
     rings: &[Vec<Vec2>],
@@ -332,10 +334,8 @@ fn add_walls(
     color: [f32; 4],
     roof: Option<&RoofShape>,
 ) {
-    for (ri, ring) in rings.iter().enumerate() {
-        // Outer ring walls face outward, courtyard walls face into the courtyard.
-        let ccw = polygon_area(ring) > 0.0;
-        let outward_flip = ccw == (ri == 0);
+    let inside = |p: Vec2| point_in_polygon(p, &rings[0]) && !rings[1..].iter().any(|h| point_in_polygon(p, h));
+    for ring in rings {
         for k in 0..ring.len() {
             let (p, q) = (ring[k], ring[(k + 1) % ring.len()]);
             let mut ts = vec![0.0, 1.0];
@@ -347,18 +347,35 @@ fn add_walls(
                 }
                 ts.sort_by(f32::total_cmp);
             }
+            // The quad below faces along (−e.z, e.x) for an edge e; flip the edge if that points inwards.
+            let e = (q - p).normalize_or_zero();
+            let probe = (p + q) / 2.0 + Vec2::new(-e.y, e.x) * 0.05;
+            let flip = inside(probe);
             for w in ts.windows(2) {
                 let (a2, b2) = (p.lerp(q, w[0]), p.lerp(q, w[1]));
                 if a2.distance_squared(b2) < 1e-4 {
                     continue;
                 }
-                let (a2, b2) = if outward_flip { (b2, a2) } else { (a2, b2) };
+                let (a2, b2) = if flip { (b2, a2) } else { (a2, b2) };
                 let (a, b) = (Vec3::new(a2.x, base, a2.y), Vec3::new(b2.x, base, b2.y));
                 let (c, d) = (Vec3::new(b2.x, top_at(b2), b2.y), Vec3::new(a2.x, top_at(a2), a2.y));
                 mb.quad(a, b, c, d, color);
             }
         }
     }
+}
+
+fn point_in_polygon(p: Vec2, ring: &[Vec2]) -> bool {
+    let mut inside = false;
+    let mut j = ring.len() - 1;
+    for i in 0..ring.len() {
+        let (a, b) = (ring[i], ring[j]);
+        if (a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
 }
 
 /// Signed area in the x/z plane (positive = counter-clockwise when viewed from above, +y).

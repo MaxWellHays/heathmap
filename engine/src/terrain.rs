@@ -7,7 +7,8 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use crate::level::{Heightmap, Level, LevelState};
+use crate::ground::{GroundMaterial, ground_material};
+use crate::level::{BinaryFile, Heightmap, Level, LevelHandles, LevelState};
 use crate::lod::LodChunk;
 
 /// Samples per chunk side (×4 m = 512 m).
@@ -22,23 +23,28 @@ pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(LevelState::Ready), spawn_terrain);
+        app.add_plugins(MaterialPlugin::<GroundMaterial>::default())
+            .add_systems(OnEnter(LevelState::Ready), spawn_terrain);
     }
 }
 
 fn spawn_terrain(
     mut commands: Commands,
     level: Res<Level>,
-    assets: Res<AssetServer>,
+    handles: Res<LevelHandles>,
+    files: Res<Assets<BinaryFile>>,
+    mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<GroundMaterial>>,
 ) {
     let hm = &level.heightmap;
-    let material = materials.add(StandardMaterial {
-        base_color_texture: Some(assets.load(format!("{}/{}", level.dir, level.meta.ground.file))),
-        perceptual_roughness: 1.0,
-        reflectance: 0.1,
-        ..default()
+    let Some(extension) = ground_material(&level, &handles, &files, &mut images) else {
+        error!("Ground distance fields missing; run data/export_engine.py");
+        return;
+    };
+    let material = materials.add(GroundMaterial {
+        base: StandardMaterial { perceptual_roughness: 1.0, reflectance: 0.1, ..default() },
+        extension,
     });
     let extent = &level.meta.extent;
     let uv_scale = Vec2::new(1.0 / (extent.x[1] - extent.x[0]), 1.0 / (extent.z[1] - extent.z[0]));

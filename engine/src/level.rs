@@ -22,6 +22,15 @@ pub struct FileMeta {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+pub struct SdfMeta {
+    pub file: String,
+    pub width: usize,
+    pub height: usize,
+    pub scale: f32,
+    pub classes: Vec<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
 pub struct Extent {
     pub x: [f32; 2],
     pub z: [f32; 2],
@@ -33,7 +42,7 @@ pub struct LevelMeta {
     pub name: String,
     pub extent: Extent,
     pub terrain: TerrainMeta,
-    pub ground: FileMeta,
+    pub ground_sdf: SdfMeta,
     pub trees: FileMeta,
     pub buildings: FileMeta,
     pub lines: FileMeta,
@@ -195,13 +204,13 @@ pub struct LevelHandles {
     pub trees: Option<Handle<BinaryFile>>,
     pub buildings: Option<Handle<BinaryFile>>,
     pub lines: Option<Handle<BinaryFile>>,
+    pub ground_sdf: Option<Handle<BinaryFile>>,
 }
 
 /// The loaded level, available once `LevelState::Ready` is reached.
 #[derive(Resource)]
 pub struct Level {
     pub meta: LevelMeta,
-    pub dir: String,
     pub heightmap: Heightmap,
     pub trees: Vec<Tree>,
 }
@@ -226,6 +235,7 @@ impl Plugin for LevelPlugin {
                     trees: None,
                     buildings: None,
                     lines: None,
+                    ground_sdf: None,
                 });
             })
             .add_systems(Update, request_data.run_if(in_state(LevelState::LoadingMeta)))
@@ -245,6 +255,7 @@ fn request_data(
     handles.trees = Some(assets.load(format!("{dir}/{}", meta.trees.file)));
     handles.buildings = Some(assets.load(format!("{dir}/{}", meta.buildings.file)));
     handles.lines = Some(assets.load(format!("{dir}/{}", meta.lines.file)));
+    handles.ground_sdf = Some(assets.load(format!("{dir}/{}", meta.ground_sdf.file)));
     next.set(LevelState::LoadingData);
 }
 
@@ -264,13 +275,13 @@ fn finish_loading(
     };
     // Buildings and lines are decoded by their own plugins; just wait for them to arrive.
     let arrived = |h: &Option<Handle<BinaryFile>>| h.as_ref().is_some_and(|h| files.contains(h));
-    if !arrived(&handles.buildings) || !arrived(&handles.lines) {
+    if !arrived(&handles.buildings) || !arrived(&handles.lines) || !arrived(&handles.ground_sdf) {
         return;
     }
     let heightmap = Heightmap::from_bytes(&meta.terrain, &meta.extent, &terrain.0);
     let trees = decode_trees(&trees.0);
     info!("Level '{}' loaded: {}×{} terrain, {} trees", meta.name, heightmap.width, heightmap.height, trees.len());
     commands.insert_resource(heightmap.clone());
-    commands.insert_resource(Level { meta: meta.clone(), dir: handles.dir.clone(), heightmap, trees });
+    commands.insert_resource(Level { meta: meta.clone(), heightmap, trees });
     next.set(LevelState::Ready);
 }

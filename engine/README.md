@@ -11,9 +11,16 @@ cd data && uv run export_engine.py   # writes engine/assets/levels/heath/
 cd ../engine && cargo run
 ```
 
-Controls: `1` orbit (drag pans, right or Ctrl/Shift + drag rotates and tilts, scroll zooms),
-`2` walk (WASD, Shift runs, mouse looks), `3` fly (WASD, Space/C up/down, scroll sets speed),
-`Esc` back to orbit, `B` buildings on/off, `T` trees on/off.
+Views (keys `1`–`4` or the panel; switching animates the camera):
+- `1` Map: drag moves the point you grabbed (terrain, tree or building); right drag or
+  Ctrl/Shift + drag orbits around it; scroll zooms smoothly towards the cursor
+- `2` Walk: WASD, Shift runs (×4.5), mouse looks
+- `3` Third person: an avatar with a follow camera; WASD, Shift, mouse orbits the camera
+- `4` Fly: WASD, Space/C up/down, Shift ×4.5, scroll sets speed
+
+In walk, third-person and fly views the mouse is captured: `Esc` releases it, clicking the
+view captures it again. The panel toggles buildings (`B`), trees (`T`), roads and paths and
+shadows, and sets the sun's direction and height.
 
 ## Remote control (native builds)
 

@@ -6,18 +6,22 @@
 
 use bevy::asset::RenderAssetUsages;
 use bevy::light::NotShadowCaster;
-use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+use bevy::image::ImageAddressMode;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::render::render_resource::TextureFormat;
 
 use crate::buildings::Reader;
 use crate::level::{BinaryFile, Heightmap, LevelHandles, LevelState};
 use crate::lod::LodChunk;
+use crate::textures::image_with_mips;
 
 const CHUNK: f32 = 512.0;
 const MAX_SEGMENT: f32 = 3.0; // m; ribbons are resampled this finely to follow the terrain
 const DRAW_DISTANCE: [f32; 1] = [3000.0];
+const CENTRE_LINE_WIDTH: f32 = 0.15;
+/// Centre lines stop this far from junctions, as painted lines do.
+const JUNCTION_CLEARANCE: f32 = 8.0;
 
 /// Must match LINE_KINDS in data/export_engine.py.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -93,8 +97,9 @@ impl Plugin for LinesPlugin {
 /// Which texture a line uses.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Look {
-    AsphaltCentreLine,
-    AsphaltPlain,
+    Asphalt,
+    /// Dashed white centre line: a narrow strip, transparent between dashes.
+    CentreLine,
     Paving,
     Gravel,
     Dirt,
@@ -103,8 +108,7 @@ enum Look {
 
 fn look(line: &Line) -> Look {
     match line.kind {
-        Kind::RoadMajor | Kind::RoadMinor if !line.oneway && line.lanes != 1 => Look::AsphaltCentreLine,
-        Kind::RoadMajor | Kind::RoadMinor | Kind::Service => Look::AsphaltPlain,
+        Kind::RoadMajor | Kind::RoadMinor | Kind::Service => Look::Asphalt,
         Kind::Pedestrian | Kind::PathPaved => Look::Paving,
         Kind::Track => Look::Gravel,
         Kind::PathUnpaved => Look::Dirt,
@@ -125,24 +129,43 @@ fn spawn_lines(
     let lines = decode_lines(&file.0);
 
     let mut material_for = std::collections::HashMap::new();
-    for l in [Look::AsphaltCentreLine, Look::AsphaltPlain, Look::Paving, Look::Gravel, Look::Dirt, Look::Stone] {
+    for l in [Look::Asphalt, Look::CentreLine, Look::Paving, Look::Gravel, Look::Dirt, Look::Stone] {
         let image = images.add(texture(l));
         let m = materials.add(StandardMaterial {
             base_color_texture: Some(image),
             perceptual_roughness: 0.95,
             reflectance: 0.1,
-            depth_bias: 50.0,
+            depth_bias: if l == Look::CentreLine { 60.0 } else { 50.0 },
+            alpha_mode: if l == Look::CentreLine { AlphaMode::Mask(0.5) } else { AlphaMode::Opaque },
             ..default()
         });
         material_for.insert(l, m);
     }
+
+    let junctions = road_junctions(&lines);
 
     // One mesh per (chunk, look).
     let mut builders: std::collections::HashMap<((i32, i32), Look), Ribbons> = default();
     for line in &lines {
         let Some(&first) = line.points.first() else { continue };
         let key = ((first.x / CHUNK).floor() as i32, (first.y / CHUNK).floor() as i32);
-        builders.entry((key, look(line))).or_default().add(line, &heightmap);
+        // Square caps (extending the ends by half the width) fill the wedges at road
+        // junctions, where overlapping asphalt looks seamless. Paths meet paths of other
+        // surfaces, so their caps would show as protruding rectangles.
+        let lift = line.kind.lift();
+        let caps = look(line) == Look::Asphalt;
+        builders.entry((key, look(line))).or_default().add(&line.points, line.width, lift, line.kind.repeat(), caps, &heightmap);
+        if has_centre_line(line) {
+            let ribbons = builders.entry((key, Look::CentreLine)).or_default();
+            for run in marking_runs(&line.points, &junctions) {
+                ribbons.add(&run, CENTRE_LINE_WIDTH, lift + 0.02, line.kind.repeat(), false, &heightmap);
+            }
+        }
+    }
+    // Round asphalt patches at junctions fill the slivers left between roads meeting at sharp angles.
+    for (centre, width) in junctions.values() {
+        let key = ((centre.x / CHUNK).floor() as i32, (centre.y / CHUNK).floor() as i32);
+        builders.entry((key, Look::Asphalt)).or_default().disc(*centre, width / 2.0, Kind::RoadMajor.lift(), &heightmap);
     }
     let root = commands.spawn((Lines, Name::new("Roads and paths"), Transform::default(), Visibility::default())).id();
     let mut triangles = 0;
@@ -173,6 +196,74 @@ fn spawn_lines(
     info!("Spawned {} roads and paths, {triangles} triangles", lines.len());
 }
 
+fn has_centre_line(line: &Line) -> bool {
+    matches!(line.kind, Kind::RoadMajor | Kind::RoadMinor) && !line.oneway && line.lanes != 1
+}
+
+fn vertex_key(p: Vec2) -> (i32, i32) {
+    ((p.x * 10.0).round() as i32, (p.y * 10.0).round() as i32)
+}
+
+/// Road vertices where three or more road segments meet (OSM ways share junction nodes),
+/// with their position and the widest road meeting there. Two segments meeting is just
+/// a way continuing, which needs no gap in the markings.
+fn road_junctions(lines: &[Line]) -> std::collections::HashMap<(i32, i32), (Vec2, f32)> {
+    let mut nodes: std::collections::HashMap<(i32, i32), (Vec2, f32, u32)> = default();
+    for line in lines.iter().filter(|l| matches!(l.kind, Kind::RoadMajor | Kind::RoadMinor | Kind::Service)) {
+        let n = line.points.len();
+        for (i, p) in line.points.iter().enumerate() {
+            let e = nodes.entry(vertex_key(*p)).or_insert((*p, 0.0, 0));
+            e.1 = e.1.max(line.width);
+            e.2 += if i == 0 || i == n - 1 { 1 } else { 2 };
+        }
+    }
+    nodes.into_iter().filter(|(_, (_, _, d))| *d >= 3).map(|(k, (p, w, _))| (k, (p, w))).collect()
+}
+
+/// Pieces of a polyline at least `JUNCTION_CLEARANCE` away (along the line) from junctions.
+fn marking_runs(points: &[Vec2], junctions: &std::collections::HashMap<(i32, i32), (Vec2, f32)>) -> Vec<Vec<Vec2>> {
+    let mut along = vec![0.0f32];
+    for w in points.windows(2) {
+        along.push(along.last().unwrap() + w[0].distance(w[1]));
+    }
+    let blocked: Vec<f32> = points
+        .iter()
+        .zip(&along)
+        .filter(|(p, _)| junctions.contains_key(&vertex_key(**p)))
+        .map(|(_, &d)| d)
+        .collect();
+    let total = *along.last().unwrap();
+    // Free intervals along the line.
+    let mut intervals = vec![(0.0, total)];
+    for b in blocked {
+        let (lo, hi) = (b - JUNCTION_CLEARANCE, b + JUNCTION_CLEARANCE);
+        intervals = intervals
+            .into_iter()
+            .flat_map(|(s, e): (f32, f32)| {
+                let mut out = Vec::new();
+                if lo > s { out.push((s, lo.min(e))); }
+                if hi < e { out.push((hi.max(s), e)); }
+                out
+            })
+            .filter(|(s, e)| e - s > 1.0)
+            .collect();
+    }
+    let point_at = |d: f32| {
+        let k = along.partition_point(|&a| a <= d).clamp(1, points.len() - 1);
+        let t = (d - along[k - 1]) / (along[k] - along[k - 1]).max(1e-6);
+        points[k - 1].lerp(points[k], t.clamp(0.0, 1.0))
+    };
+    intervals
+        .into_iter()
+        .map(|(s, e)| {
+            let mut run = vec![point_at(s)];
+            run.extend(points.iter().zip(&along).filter(|(_, d)| **d > s && **d < e).map(|(p, _)| *p));
+            run.push(point_at(e));
+            run
+        })
+        .collect()
+}
+
 #[derive(Default)]
 struct Ribbons {
     positions: Vec<[f32; 3]>,
@@ -182,23 +273,32 @@ struct Ribbons {
 }
 
 impl Ribbons {
-    fn add(&mut self, line: &Line, hm: &Heightmap) {
+    fn add(&mut self, points: &[Vec2], width: f32, lift: f32, repeat: f32, caps: bool, hm: &Heightmap) {
+        if points.len() < 2 {
+            return;
+        }
+        let half = width / 2.0;
+        let mut points = points.to_vec();
+        if caps {
+            let n = points.len();
+            let start_dir = (points[0] - points[1]).normalize_or_zero();
+            let end_dir = (points[n - 1] - points[n - 2]).normalize_or_zero();
+            points[0] += start_dir * half;
+            points[n - 1] += end_dir * half;
+        }
         // Resample so the ribbon follows the terrain between OSM vertices.
-        let mut pts = Vec::with_capacity(line.points.len() * 2);
-        for w in line.points.windows(2) {
+        let mut pts = Vec::with_capacity(points.len() * 2);
+        for w in points.windows(2) {
             let n = ((w[1] - w[0]).length() / MAX_SEGMENT).ceil().max(1.0) as usize;
             for k in 0..n {
                 pts.push(w[0].lerp(w[1], k as f32 / n as f32));
             }
         }
-        pts.push(*line.points.last().unwrap());
+        pts.push(*points.last().unwrap());
         pts.dedup_by(|a, b| a.distance_squared(*b) < 1e-4);
         if pts.len() < 2 {
             return;
         }
-        let half = line.width / 2.0;
-        let lift = line.kind.lift();
-        let repeat = line.kind.repeat();
         let start = self.positions.len() as u32;
         let mut along = 0.0;
         for i in 0..pts.len() {
@@ -232,6 +332,28 @@ impl Ribbons {
         }
     }
 
+    /// A flat disc draped on the terrain (a fan of triangles facing up).
+    fn disc(&mut self, centre: Vec2, radius: f32, lift: f32, hm: &Heightmap) {
+        const SIDES: usize = 16;
+        let start = self.positions.len() as u32;
+        self.positions.push([centre.x, hm.sample(centre.x, centre.y) + lift, centre.y]);
+        self.normals.push([0.0, 1.0, 0.0]);
+        self.uvs.push([0.5, 0.0]);
+        for k in 0..SIDES {
+            let a = k as f32 / SIDES as f32 * std::f32::consts::TAU;
+            let p = centre + Vec2::new(a.cos(), a.sin()) * radius;
+            self.positions.push([p.x, hm.sample(p.x, p.y) + lift, p.y]);
+            self.normals.push([0.0, 1.0, 0.0]);
+            self.uvs.push([0.5, 0.0]);
+        }
+        for k in 0..SIDES as u32 {
+            // Angles increase from +x towards +z (south), i.e. clockwise seen from above:
+            // centre, next, current is counter-clockwise from above, so it faces up.
+            let (cur, next) = (start + 1 + k, start + 1 + (k + 1) % SIDES as u32);
+            self.indices.extend_from_slice(&[start, next, cur]);
+        }
+    }
+
     fn build(self) -> Mesh {
         Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
             .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
@@ -255,8 +377,9 @@ fn texture(look: Look) -> Image {
             let u = (x as f32 + 0.5) / W as f32;
             let v = (y as f32 + 0.5) / H as f32;
             let n = noise(x, y);
-            let (mut r, mut g, mut b) = match look {
-                Look::AsphaltCentreLine | Look::AsphaltPlain => (0.30 + 0.05 * n, 0.30 + 0.05 * n, 0.32 + 0.05 * n),
+            let (r, g, b) = match look {
+                Look::Asphalt => (0.30 + 0.05 * n, 0.30 + 0.05 * n, 0.32 + 0.05 * n),
+                Look::CentreLine => (0.93, 0.93, 0.90),
                 Look::Paving => {
                     // Slabs: darker joints every 1/4 across and 1/8 along.
                     let joint = (u * 4.0).fract() < 0.04 || (v * 8.0).fract() < 0.03;
@@ -271,62 +394,12 @@ fn texture(look: Look) -> Image {
                     (s, s, s * 0.97)
                 }
             };
-            if look == Look::AsphaltCentreLine && (u - 0.5).abs() < 0.035 && v < 0.5 {
-                (r, g, b) = (0.92, 0.92, 0.90); // dashed centre line
-            }
-            if matches!(look, Look::AsphaltCentreLine | Look::AsphaltPlain) && (u < 0.03 || u > 0.97) {
-                (r, g, b) = (0.55, 0.55, 0.55); // kerb edge
-            }
+            // Centre line: 6 m dash, 6 m gap (one repeat is 12 m).
+            let alpha = if look == Look::CentreLine && v >= 0.5 { 0 } else { 255 };
             let i = (y * W + x) * 4;
             let to8 = |c: f32| (c.clamp(0.0, 1.0) * 255.0) as u8;
-            rgba[i..i + 4].copy_from_slice(&[to8(r), to8(g), to8(b), 255]);
+            rgba[i..i + 4].copy_from_slice(&[to8(r), to8(g), to8(b), alpha]);
         }
     }
-    image_with_mips(W, H, rgba)
-}
-
-/// RGBA8 sRGB image with a full box-filtered mip chain, repeating, anisotropic sampling —
-/// keeps markings crisp up close and stops shimmering in the distance.
-fn image_with_mips(w: usize, h: usize, base: Vec<u8>) -> Image {
-    let mut data = base.clone();
-    let (mut lw, mut lh, mut level) = (w, h, base);
-    let mut levels = 1;
-    while lw > 1 || lh > 1 {
-        let (nw, nh) = ((lw / 2).max(1), (lh / 2).max(1));
-        let mut next = vec![0u8; nw * nh * 4];
-        for y in 0..nh {
-            for x in 0..nw {
-                for c in 0..4 {
-                    let mut sum = 0u32;
-                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                        let (sx, sy) = ((2 * x + dx).min(lw - 1), (2 * y + dy).min(lh - 1));
-                        sum += level[(sy * lw + sx) * 4 + c] as u32;
-                    }
-                    next[(y * nw + x) * 4 + c] = (sum / 4) as u8;
-                }
-            }
-        }
-        data.extend_from_slice(&next);
-        (lw, lh, level) = (nw, nh, next);
-        levels += 1;
-    }
-    // `Image::new` only accepts the base level; mip levels follow it in `data`.
-    let mut image = Image::new_uninit(
-        Extent3d { width: w as u32, height: h as u32, depth_or_array_layers: 1 },
-        TextureDimension::D2,
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    image.data = Some(data);
-    image.texture_descriptor.mip_level_count = levels;
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-        address_mode_u: ImageAddressMode::ClampToEdge,
-        address_mode_v: ImageAddressMode::Repeat,
-        mag_filter: ImageFilterMode::Linear,
-        min_filter: ImageFilterMode::Linear,
-        mipmap_filter: ImageFilterMode::Linear,
-        anisotropy_clamp: 16,
-        ..default()
-    });
-    image
+    image_with_mips(W, H, rgba, TextureFormat::Rgba8UnormSrgb, ImageAddressMode::ClampToEdge, ImageAddressMode::Repeat)
 }

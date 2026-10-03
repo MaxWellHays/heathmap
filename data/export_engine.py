@@ -159,6 +159,66 @@ def export_ground(meta: dict) -> None:
     print(f"  ground: {width}×{height} px at {GROUND_RES} m")
 
 
+# Ground classes for the signed distance fields, in paint order (later covers earlier).
+# Must match engine/src/ground.rs. Three RGBA textures hold 4 classes each.
+SDF_CLASSES = ["park", "grass", "meadow", "scrub", "heath", "wood",
+               "cemetery", "pitch", "wetland", "water", "road", "road_major"]
+SDF_RES = 4.0  # metres per texel; edges stay sharp, corners round at about this scale
+SDF_FINE = 1.0  # metres per pixel for the masks the distances are computed from
+SDF_SCALE = 8.0  # texel value steps per metre (128 = on the edge; ±16 m range)
+
+
+def export_ground_sdf(meta: dict) -> None:
+    """Signed distance to each ground class's boundary (negative inside), for sharp edges.
+
+    The engine's terrain shader thresholds these per pixel, so area edges stay crisp at
+    any zoom (the technique used for sharp text in games), unlike a colour texture.
+    Format: raw u8, len(SDF_CLASSES)/4 layers of width × height × RGBA, rows from the north.
+    """
+    from scipy.ndimage import distance_transform_edt
+
+    e0, n0, e1, n1 = BBOX_BNG
+    fine_w, fine_h = int((e1 - e0) / SDF_FINE), int((n1 - n0) / SDF_FINE)
+    step = int(SDF_RES / SDF_FINE)
+    out_w, out_h = fine_w // step, fine_h // step
+    transform = from_origin(e0, n1, SDF_FINE, SDF_FINE)
+
+    shapes: dict[str, list] = {c: [] for c in SDF_CLASSES}
+    for f in ogr_features("multipolygons", "landuse IS NOT NULL OR natural IS NOT NULL OR leisure IS NOT NULL",
+                          "landuse,natural,leisure"):
+        p = f["properties"]
+        for key in ("natural", "landuse", "leisure"):
+            cls = LANDUSE_CLASSES.get((key, p.get(key)))
+            if cls:
+                shapes[cls].append(shape(f["geometry"]))
+                break
+    for f in ogr_features("lines", "highway IS NOT NULL", "highway,other_tags"):
+        hw = f["properties"]["highway"]
+        if hw in ROAD_WIDTHS:
+            cls = "road_major" if hw in MAJOR_ROADS else "road"
+            shapes[cls].append(shape(f["geometry"]).buffer(ROAD_WIDTHS[hw] / 2, cap_style="flat"))
+
+    layers = np.zeros((len(SDF_CLASSES) // 4, out_h, out_w, 4), dtype=np.uint8)
+    centre = step // 2  # sample the fine distances at coarse texel centres
+    for i, cls in enumerate(SDF_CLASSES):
+        geoms = [g for g in shapes[cls] if not g.is_empty]
+        if geoms:
+            mask = rasterize(((g, 1) for g in geoms), out_shape=(fine_h, fine_w), transform=transform,
+                             dtype="uint8").astype(bool)
+            outside = distance_transform_edt(~mask)[centre::step, centre::step]
+            inside = distance_transform_edt(mask)[centre::step, centre::step]
+            signed = (outside - inside) * SDF_FINE
+            del mask
+        else:
+            signed = np.full((out_h, out_w), 999.0)
+        layers[i // 4, :, :, i % 4] = np.clip(np.round(128 + signed[:out_h, :out_w] * SDF_SCALE), 0, 255)
+        print(f"    sdf {cls}: {len(geoms)} shapes")
+    (LEVEL_DIR / "ground_sdf.bin").write_bytes(layers.tobytes())
+    meta["ground_sdf"] = {"file": "ground_sdf.bin", "width": out_w, "height": out_h, "resolution": SDF_RES,
+                          "layers": len(SDF_CLASSES) // 4, "scale": SDF_SCALE, "classes": SDF_CLASSES}
+    print(f"  ground sdf: {len(SDF_CLASSES)} classes, {out_w}×{out_h} at {SDF_RES} m")
+
+
 def export_trees(meta: dict) -> None:
     rows = list(csv.DictReader((BUILD_DIR / "trees_lidar.csv").open()))
     data = np.empty((len(rows), 5), dtype="<f4")
@@ -272,6 +332,7 @@ def main() -> None:
     meta = {"name": "Hampstead Heath", "origin_bng": ORIGIN, "extent": {"x": [x0, x1], "z": [z0, z1]}}
     export_terrain(meta)
     export_ground(meta)
+    export_ground_sdf(meta)
     export_trees(meta)
     export_buildings(meta)
     export_lines(meta)
