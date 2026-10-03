@@ -13,6 +13,7 @@
 //! Walk and third person both move the `Player` (the future runner / game avatar).
 
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
+use bevy::pbr::ContactShadows;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy_egui::input::EguiWantsInput;
@@ -30,7 +31,8 @@ const LOOK_SENSITIVITY: f32 = 0.0025; // radians per pixel
 const ORBIT_SENSITIVITY: f32 = 0.005;
 const MIN_TILT: f32 = 0.08; // map view: radians below the horizon (almost level)
 const MAX_TILT: f32 = std::f32::consts::FRAC_PI_2 - 0.001; // straight down
-const FOLLOW_DISTANCE: f32 = 5.0;
+const FOLLOW_DISTANCE: f32 = 5.0; // default third-person camera distance (scroll changes it)
+const FOLLOW_RANGE: (f32, f32) = (1.5, 120.0);
 const MIN_CAMERA_CLEARANCE: f32 = 2.0; // map view: metres above the terrain
 const ZOOM_STEP: f32 = 0.82; // distance factor per scroll notch
 const ZOOM_SMOOTHING: f32 = 14.0; // 1/s; higher settles faster
@@ -82,6 +84,8 @@ pub struct ViewAngles {
     pub yaw: f32,
     pub pitch: f32,
     pub fly_speed: f32,
+    /// Third-person camera distance from the player.
+    pub follow_distance: f32,
 }
 
 /// An animated camera move between modes; mode controls pause while it runs.
@@ -152,13 +156,16 @@ fn spawn_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
         Projection::Perspective(PerspectiveProjection { far: 30_000.0, near: 0.2, ..default() }),
-        ViewAngles { yaw: 0.0, pitch: 0.0, fly_speed: 25.0 },
+        ViewAngles { yaw: 0.0, pitch: 0.0, fly_speed: 25.0, follow_distance: FOLLOW_DISTANCE },
         Transform::from_xyz(0.0, 3000.0, 0.0).looking_at(Vec3::ZERO, Vec3::NEG_Z),
         DistanceFog {
             color: Color::srgb(0.78, 0.85, 0.92),
             falloff: FogFalloff::Linear { start: 3000.0, end: 12000.0 },
             ..default()
         },
+        // Screen-space contact shadows: small-scale detail the shadow map is too coarse for
+        // (stair steps, kerbs, where things meet the ground). Needs a depth prepass.
+        ContactShadows { linear_steps: 16, thickness: 0.2, length: 0.8 },
     ));
 }
 
@@ -361,7 +368,7 @@ fn switch_mode(
     let to = match target {
         CameraMode::Walk => Transform::from_translation(player_tf.translation + Vec3::Y * EYE_HEIGHT)
             .with_rotation(Quat::from_euler(EulerRot::YXZ, angles.yaw, angles.pitch, 0.0)),
-        CameraMode::ThirdPerson => third_person_view(&hm, player_tf.translation, angles.yaw, angles.pitch),
+        CameraMode::ThirdPerson => third_person_view(&hm, player_tf.translation, angles.yaw, angles.pitch, angles.follow_distance),
         CameraMode::Fly => {
             let lift = if current == CameraMode::Map { 0.0 } else { 30.0 };
             Transform::from_translation(cam.translation + Vec3::Y * lift)
@@ -478,21 +485,32 @@ fn follow_first_person(players: Query<&Transform, With<Player>>, mut cams: Query
     cam.translation = player.translation + Vec3::Y * EYE_HEIGHT;
 }
 
-fn third_person_view(hm: &Heightmap, feet: Vec3, yaw: f32, pitch: f32) -> Transform {
+fn third_person_view(hm: &Heightmap, feet: Vec3, yaw: f32, pitch: f32, distance: f32) -> Transform {
     let head = feet + Vec3::Y * 1.5;
     let rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch.min(0.4), 0.0);
-    let mut eye = head + rotation * Vec3::new(0.0, 0.0, FOLLOW_DISTANCE);
+    let mut eye = head + rotation * Vec3::new(0.0, 0.0, distance);
     eye.y = eye.y.max(hm.sample(eye.x, eye.z) + 0.5);
     Transform::from_translation(eye).looking_at(head, Vec3::Y)
 }
 
+/// Third-person camera; scrolling moves it closer to or further from the player.
 fn follow_third_person(
     hm: Res<Heightmap>,
+    scroll: Res<AccumulatedMouseScroll>,
+    egui: Option<Res<EguiWantsInput>>,
     players: Query<&Transform, With<Player>>,
-    mut cams: Query<(&ViewAngles, &mut Transform), (With<Camera3d>, Without<Player>)>,
+    mut cams: Query<(&mut ViewAngles, &mut Transform), (With<Camera3d>, Without<Player>)>,
 ) {
-    let (Ok(player), Ok((angles, mut cam))) = (players.single(), cams.single_mut()) else { return };
-    *cam = third_person_view(&hm, player.translation, angles.yaw, angles.pitch);
+    let (Ok(player), Ok((mut angles, mut cam))) = (players.single(), cams.single_mut()) else { return };
+    let over_ui = egui.is_some_and(|e| e.is_pointer_over_area());
+    if scroll.delta.y != 0.0 && !over_ui {
+        let lines = match scroll.unit {
+            MouseScrollUnit::Line => scroll.delta.y,
+            MouseScrollUnit::Pixel => scroll.delta.y / 40.0,
+        };
+        angles.follow_distance = (angles.follow_distance * 0.85f32.powf(lines)).clamp(FOLLOW_RANGE.0, FOLLOW_RANGE.1);
+    }
+    *cam = third_person_view(&hm, player.translation, angles.yaw, angles.pitch, angles.follow_distance);
 }
 
 fn fly(

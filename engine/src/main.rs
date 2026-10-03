@@ -77,7 +77,7 @@ fn main() {
 fn spawn_sun(mut commands: Commands) {
     commands.spawn((
         Sun,
-        DirectionalLight { illuminance: 9_000.0, shadow_maps_enabled: true, ..default() },
+        DirectionalLight { illuminance: 9_000.0, shadow_maps_enabled: true, contact_shadows_enabled: true, ..default() },
         Transform::default(),
         shadow_cascades(1000.0),
     ));

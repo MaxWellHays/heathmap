@@ -35,6 +35,8 @@ pub struct Bookmarks {
     pub save: Option<String>,
     /// Set to an index to delete that bookmark.
     pub delete: Option<usize>,
+    /// Set to (from, to) to move a bookmark to another position in the list.
+    pub move_to: Option<(usize, usize)>,
 }
 
 pub struct BookmarksPlugin;
@@ -117,6 +119,14 @@ fn delete(mut bookmarks: ResMut<Bookmarks>) {
         && i < bookmarks.list.len()
     {
         bookmarks.list.remove(i);
+        store(&bookmarks.list);
+    }
+    if let Some((from, to)) = bookmarks.move_to.take()
+        && from < bookmarks.list.len()
+        && to < bookmarks.list.len()
+    {
+        let b = bookmarks.list.remove(from);
+        bookmarks.list.insert(to, b);
         store(&bookmarks.list);
     }
 }

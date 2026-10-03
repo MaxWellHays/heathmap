@@ -55,6 +55,12 @@ fn style(ctx: &egui::Context) {
     ctx.set_visuals(visuals);
 }
 
+enum BookmarkAction {
+    Goto(usize),
+    Move(usize, usize),
+    Delete(usize),
+}
+
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(47, 107, 47);
 const MUTED: egui::Color32 = egui::Color32::from_rgb(95, 107, 95);
 const COMPASS: [&str; 8] = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
@@ -85,7 +91,7 @@ fn panel(
     egui::Window::new(egui::RichText::new("heathmap").color(ACCENT).strong().size(18.0))
         .anchor(egui::Align2::LEFT_TOP, [10.0, 10.0])
         .resizable(false)
-        .default_width(230.0)
+        .default_width(260.0)
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Hampstead Heath").color(MUTED));
@@ -143,29 +149,38 @@ fn panel(
 
             egui::CollapsingHeader::new(egui::RichText::new("Bookmarks").color(MUTED)).default_open(false).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut *bookmark_name).hint_text("name").desired_width(120.0));
-                    if ui.button("Save view").clicked() {
+                    let field = ui.add(egui::TextEdit::singleline(&mut *bookmark_name).hint_text("name").desired_width(120.0));
+                    // Enter in the field saves too (egui drops focus on Enter).
+                    let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if ui.button("Save view").clicked() || entered {
                         bookmarks.save = Some(std::mem::take(&mut *bookmark_name));
                     }
                 });
-                let mut goto = None;
-                let mut delete = None;
+                let count = bookmarks.list.len();
+                let mut action = None;
                 for (i, b) in bookmarks.list.iter().enumerate() {
                     ui.horizontal(|ui| {
                         if ui.small_button("Go").clicked() {
-                            goto = Some(i);
+                            action = Some(BookmarkAction::Goto(i));
                         }
-                        if ui.small_button("✕").on_hover_text("Delete").clicked() {
-                            delete = Some(i);
+                        // Plain-text labels: the default font has no glyphs for arrows or ✕.
+                        if ui.add_enabled(i > 0, egui::Button::new("Up").small()).clicked() {
+                            action = Some(BookmarkAction::Move(i, i - 1));
+                        }
+                        if ui.add_enabled(i + 1 < count, egui::Button::new("Down").small()).clicked() {
+                            action = Some(BookmarkAction::Move(i, i + 1));
+                        }
+                        if ui.small_button("Delete").clicked() {
+                            action = Some(BookmarkAction::Delete(i));
                         }
                         ui.label(egui::RichText::new(format!("{}. {}", i + 1, b.name)).small());
                     });
                 }
-                if goto.is_some() {
-                    bookmarks.goto = goto;
-                }
-                if delete.is_some() {
-                    bookmarks.delete = delete;
+                match action {
+                    Some(BookmarkAction::Goto(i)) => bookmarks.goto = Some(i),
+                    Some(BookmarkAction::Delete(i)) => bookmarks.delete = Some(i),
+                    Some(BookmarkAction::Move(from, to)) => bookmarks.move_to = Some((from, to)),
+                    None => {}
                 }
             });
 
@@ -173,7 +188,7 @@ fn panel(
                 let help = match current {
                     CameraMode::Map => "Drag: move the point you grabbed\nRight drag / Ctrl+drag: orbit around it\nScroll: zoom towards the cursor",
                     CameraMode::Walk => "WASD: walk, Shift: run (×4.5), Space: jump\nMouse: look around\nEsc: release the mouse",
-                    CameraMode::ThirdPerson => "WASD: walk, Shift: run (×4.5), Space: jump\nMouse: orbit the camera\nEsc: release the mouse",
+                    CameraMode::ThirdPerson => "WASD: walk, Shift: run (×4.5), Space: jump\nMouse: orbit the camera, scroll: zoom\nEsc: release the mouse",
                     CameraMode::Fly => "WASD: fly, Space/C: up/down\nShift: ×4.5, scroll: speed\nMouse: look, Esc: release the mouse",
                 };
                 ui.label(egui::RichText::new(help).small());

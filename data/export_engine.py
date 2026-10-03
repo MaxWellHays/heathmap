@@ -220,12 +220,57 @@ def export_ground_sdf(meta: dict) -> None:
     print(f"  ground sdf: {len(SDF_CLASSES)} classes, {out_w}×{out_h} at {SDF_RES} m")
 
 
+TRUNK_CLEARANCE = 0.6  # metres between a trunk and the edge of a road or path
+
+
+def path_areas() -> list:
+    """Road and path surfaces (centre lines buffered to their width), in BNG."""
+    areas = []
+    for f in ogr_features("lines", "highway IS NOT NULL", "highway,other_tags"):
+        hw = f["properties"]["highway"]
+        if hw in ROAD_WIDTHS:
+            width = ROAD_WIDTHS[hw]
+        elif hw in PATH_HIGHWAYS:
+            if tag(f["properties"].get("other_tags"), "footway") in ("sidewalk", "crossing"):
+                continue
+            width = {"track": 3.0, "steps": 2.0}.get(hw, 1.5)
+        else:
+            continue
+        areas.append(shape(f["geometry"]).buffer(width / 2 + TRUNK_CLEARANCE))
+    return areas
+
+
 def export_trees(meta: dict) -> None:
+    """Trees, with trunks that fall on a road or path moved just outside it.
+
+    LIDAR tree tops are often over paths (crowns overhang them), but a trunk in the
+    middle of a path looks wrong and blocks walking; the crown stays where it was.
+    """
+    from shapely import STRtree
+    from shapely.geometry import Point
+    from shapely.ops import nearest_points, unary_union
+
     rows = list(csv.DictReader((BUILD_DIR / "trees_lidar.csv").open()))
+    areas = path_areas()
+    index = STRtree(areas)
     data = np.empty((len(rows), 5), dtype="<f4")
+    moved = 0
     for i, r in enumerate(rows):
-        x, z = to_local(float(r["x"]), float(r["y"]))
+        bx, by = float(r["x"]), float(r["y"])
+        p = Point(bx, by)
+        hits = [areas[j] for j in index.query(p, predicate="intersects")]
+        if hits:
+            region = unary_union(hits)
+            # Push to the nearest point on the region's boundary, plus a little more outwards.
+            edge = nearest_points(region.boundary, p)[0]
+            direction = np.array([edge.x - bx, edge.y - by])
+            norm = np.linalg.norm(direction)
+            if norm > 1e-6:
+                bx, by = edge.x + direction[0] / norm * 0.1, edge.y + direction[1] / norm * 0.1
+                moved += 1
+        x, z = to_local(bx, by)
         data[i] = (x, z, float(r["ground"]), float(r["height"]), float(r["crown_r"]))
+    print(f"    moved {moved} trunks off roads and paths")
     (LEVEL_DIR / "trees.bin").write_bytes(data.tobytes())
     meta["trees"] = {"file": "trees.bin", "count": len(rows), "fields": ["x", "z", "ground", "height", "crown_r"]}
     print(f"  trees: {len(rows)}")

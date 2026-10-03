@@ -19,6 +19,7 @@ use bevy::render::render_resource::{AsBindGroup, Extent3d, ShaderType, TextureDi
 use bevy::shader::ShaderRef;
 
 use crate::level::{BinaryFile, Heightmap, Level, LevelHandles, LevelState};
+use crate::camera::{CameraMode, Player};
 use crate::pick::terrain_hit;
 use crate::textures::image_with_mips;
 
@@ -161,6 +162,25 @@ impl Default for VisibleElevation {
     }
 }
 
+/// The full-resolution heightmap as a texture, shared by the terrain and line shaders.
+#[derive(Resource, Clone)]
+pub struct HeightTexture {
+    pub image: Handle<Image>,
+    /// x, y = world x/z of sample (0, 0), z = metres per sample.
+    pub grid: Vec4,
+    /// Size in samples (x, y).
+    pub size: Vec4,
+}
+
+pub fn create_height_texture(mut commands: Commands, level: Res<Level>, mut images: ResMut<Assets<Image>>) {
+    let hm = &level.heightmap;
+    commands.insert_resource(HeightTexture {
+        image: images.add(height_texture(hm)),
+        grid: Vec4::new(hm.origin.x, hm.origin.y, hm.resolution, 0.0),
+        size: Vec4::new(hm.width as f32, hm.height as f32, 0.0, 0.0),
+    });
+}
+
 /// The terrain's material, so settings changes can update it.
 #[derive(Resource)]
 pub struct GroundMaterialHandle(pub Handle<GroundMaterial>);
@@ -180,22 +200,50 @@ impl Plugin for GroundPlugin {
             .init_resource::<ElevationSettings>()
             .init_resource::<VisibleElevation>()
             .init_resource::<ElevationTargets>()
+            .add_systems(OnEnter(LevelState::Ready), create_height_texture)
             .add_systems(Update, (track_visible_elevation, apply_elevation_settings).chain().run_if(in_state(LevelState::Ready)));
     }
 }
 
+/// The height "you are at": the player's feet when walking, the ground under the camera
+/// when flying, the ground at the centre of the screen in the map view.
+fn reference_height(
+    mode: CameraMode,
+    hm: &Heightmap,
+    camera: &Camera,
+    cam_tf: &GlobalTransform,
+    player: Option<Vec3>,
+) -> Option<f32> {
+    match mode {
+        CameraMode::Walk | CameraMode::ThirdPerson => player.map(|p| p.y),
+        CameraMode::Fly => {
+            let p = cam_tf.translation();
+            Some(hm.sample(p.x, p.z))
+        }
+        CameraMode::Map => {
+            let centre = camera.logical_viewport_size()? / 2.0;
+            let ray = camera.viewport_to_world(cam_tf, centre).ok()?;
+            terrain_hit(ray, hm, 30_000.0).map(|t| ray.get_point(t).y)
+        }
+    }
+}
+
 /// Samples terrain heights under a grid of screen points a few times a second and eases
-/// the visible range towards their 2nd–98th percentiles.
+/// the visible range towards them, centred on the height you are at: your own level is
+/// always the middle colour, and the range reaches as far up and down as the view does.
+#[allow(clippy::too_many_arguments)]
 fn track_visible_elevation(
     time: Res<Time>,
     settings: Res<ElevationSettings>,
     hm: Res<Heightmap>,
+    mode: Res<State<CameraMode>>,
     cams: Query<(&Camera, &GlobalTransform)>,
+    players: Query<&Transform, With<Player>>,
     mut visible: ResMut<VisibleElevation>,
     mut timer: Local<f32>,
     mut target: Local<Option<(f32, f32)>>,
 ) {
-    if !settings.auto_range || !settings.colors {
+    if !settings.auto_range || !(settings.colors || settings.contours) {
         return;
     }
     *timer -= time.delta_secs();
@@ -216,12 +264,11 @@ fn track_visible_elevation(
             if heights.len() >= 4 {
                 heights.sort_by(f32::total_cmp);
                 let pick = |q: f32| heights[((heights.len() - 1) as f32 * q).round() as usize];
-                let (mut lo, mut hi) = (pick(0.02), pick(0.98));
-                if hi - lo < MIN_VISIBLE_SPAN {
-                    let mid = (lo + hi) / 2.0;
-                    (lo, hi) = (mid - MIN_VISIBLE_SPAN / 2.0, mid + MIN_VISIBLE_SPAN / 2.0);
-                }
-                *target = Some((lo, hi));
+                let (lo, hi) = (pick(0.02), pick(0.98));
+                let centre = reference_height(*mode.get(), &hm, camera, cam_tf, players.single().ok().map(|t| t.translation))
+                    .unwrap_or((lo + hi) / 2.0);
+                let reach = (centre - lo).max(hi - centre).max(MIN_VISIBLE_SPAN / 2.0);
+                *target = Some((centre - reach, centre + reach));
             }
         }
     }
@@ -279,6 +326,7 @@ pub fn ground_material(
     handles: &LevelHandles,
     files: &Assets<BinaryFile>,
     images: &mut Assets<Image>,
+    height: &HeightTexture,
 ) -> Option<GroundExtension> {
     let meta = &level.meta.ground_sdf;
     let bytes = &files.get(handles.ground_sdf.as_ref()?)?.0;
@@ -299,8 +347,6 @@ pub fn ground_material(
         ))
     };
     let (sdf0, sdf1, sdf2) = (layer(0), layer(1), layer(2));
-    let hm = &level.heightmap;
-    let height = images.add(height_texture(hm));
 
     let mut colors = [linear(BASE_COLOR); 13];
     for (i, name) in meta.classes.iter().enumerate().take(12) {
@@ -312,13 +358,13 @@ pub fn ground_material(
         params: GroundParams {
             colors,
             sdf_scale: Vec4::new(meta.scale, 0.0, 0.0, 0.0),
-            height_grid: Vec4::new(hm.origin.x, hm.origin.y, hm.resolution, 0.0),
-            height_size: Vec4::new(hm.width as f32, hm.height as f32, 0.0, 0.0),
+            height_grid: height.grid,
+            height_size: height.size,
             elevation: ElevationUniform::default(),
         },
         sdf0,
         sdf1,
         sdf2,
-        height,
+        height: height.image.clone(),
     })
 }

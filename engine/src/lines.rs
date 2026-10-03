@@ -15,7 +15,7 @@ use bevy::shader::ShaderRef;
 use bevy::render::render_resource::TextureFormat;
 
 use crate::buildings::Reader;
-use crate::ground::{ElevationTargets, ElevationUniform};
+use crate::ground::{ElevationTargets, ElevationUniform, HeightTexture, create_height_texture};
 use crate::level::{BinaryFile, Heightmap, LevelHandles, LevelState};
 use crate::lod::LodChunk;
 use crate::textures::image_with_mips;
@@ -103,10 +103,17 @@ pub struct Lines;
 /// Road and path material: standard textured surface plus optional elevation tint.
 pub type LinesMaterial = ExtendedMaterial<StandardMaterial, LineTint>;
 
-#[derive(Asset, AsBindGroup, TypePath, Debug, Clone, Default)]
+#[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
 pub struct LineTint {
     #[uniform(100)]
     pub elevation: ElevationUniform,
+    /// Heightmap placement (as in the terrain shader), so contours on roads match the terrain's.
+    #[uniform(101)]
+    pub height_grid: Vec4,
+    #[uniform(102)]
+    pub height_size: Vec4,
+    #[texture(103, sample_type = "float", filterable = false)]
+    pub height: Handle<Image>,
 }
 
 impl MaterialExtension for LineTint {
@@ -120,7 +127,7 @@ pub struct LinesPlugin;
 impl Plugin for LinesPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<LinesMaterial>::default())
-            .add_systems(OnEnter(LevelState::Ready), spawn_lines);
+            .add_systems(OnEnter(LevelState::Ready), spawn_lines.after(create_height_texture));
     }
 }
 
@@ -166,6 +173,7 @@ fn spawn_lines(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<LinesMaterial>>,
     mut targets: ResMut<ElevationTargets>,
+    height: Res<HeightTexture>,
 ) {
     let Some(file) = handles.lines.as_ref().and_then(|h| files.get(h)) else { return };
     let lines = decode_lines(&file.0);
@@ -184,12 +192,28 @@ fn spawn_lines(
             cull_mode: if l.casts_shadows() { None } else { Some(bevy::render::render_resource::Face::Back) },
             ..default()
         };
-        let m = materials.add(LinesMaterial { base, extension: LineTint::default() });
+        let extension = LineTint {
+            elevation: ElevationUniform::default(),
+            height_grid: height.grid,
+            height_size: height.size,
+            height: height.image.clone(),
+        };
+        let m = materials.add(LinesMaterial { base, extension });
         targets.lines.push(m.clone());
         material_for.insert(l, m);
     }
 
     let junctions = road_junctions(&lines);
+    // Widest non-step line passing *through* each vertex: stairs ending on a path or road
+    // that continues past them stop at its edge instead of running over it. Where a path
+    // simply ends at the stairs, they join end to end and nothing is trimmed.
+    let mut width_at: std::collections::HashMap<(i32, i32), f32> = default();
+    for l in lines.iter().filter(|l| l.kind != Kind::Steps && l.points.len() > 2) {
+        for p in &l.points[1..l.points.len() - 1] {
+            let w = width_at.entry(vertex_key(*p)).or_default();
+            *w = w.max(l.width);
+        }
+    }
     // Where paths meet steps, the stairs themselves form the join; a round cap would cover the bottom step.
     let step_ends: std::collections::HashSet<(i32, i32)> = lines
         .iter()
@@ -205,7 +229,9 @@ fn spawn_lines(
         let lift = line.kind.lift();
         let line_look = look(line);
         if line.kind == Kind::Steps && !line.bridge {
-            builders.entry((key, Look::Stone)).or_default().stairs(&line.points, line.width, &heightmap);
+            let trim = |p: &Vec2| width_at.get(&vertex_key(*p)).map_or(0.0, |w| w / 2.0);
+            let points = trim_polyline(&line.points, trim(&line.points[0]), trim(line.points.last().unwrap()));
+            builders.entry((key, Look::Stone)).or_default().stairs(&points, line.width, &heightmap);
             continue;
         }
         // Bridges: a straight deck between the two ends (never below the terrain), plus structure.
@@ -277,6 +303,35 @@ fn spawn_lines(
         commands.entity(root).add_child(chunk);
     }
     info!("Spawned {} roads and paths, {triangles} triangles", lines.len());
+}
+
+/// The polyline with `start` metres cut off its beginning and `end` metres off its end
+/// (keeping at least a short piece).
+fn trim_polyline(points: &[Vec2], start: f32, end: f32) -> Vec<Vec2> {
+    let total: f32 = points.windows(2).map(|w| w[0].distance(w[1])).sum();
+    let (start, end) = if start + end > total - 0.8 {
+        let scale = ((total - 0.8) / (start + end).max(1e-3)).max(0.0);
+        (start * scale, end * scale)
+    } else {
+        (start, end)
+    };
+    let (from, to) = (start, total - end);
+    let mut out = Vec::new();
+    let mut along = 0.0;
+    for w in points.windows(2) {
+        let len = w[0].distance(w[1]);
+        let (a, b) = (along, along + len);
+        if b >= from && a <= to {
+            let t0 = ((from - a) / len.max(1e-6)).clamp(0.0, 1.0);
+            let t1 = ((to - a) / len.max(1e-6)).clamp(0.0, 1.0);
+            if out.is_empty() {
+                out.push(w[0].lerp(w[1], t0));
+            }
+            out.push(w[0].lerp(w[1], t1));
+        }
+        along = b;
+    }
+    if out.len() < 2 { points.to_vec() } else { out }
 }
 
 fn has_centre_line(line: &Line) -> bool {
@@ -505,10 +560,12 @@ impl Ribbons {
 
     /// Stairs along a steps line: treads about 0.4 m deep, each step's top at the terrain
     /// height rounded to 16 cm rises (so the steps follow the slope as it really is, with
-    /// landings where it flattens), each tread a box down into the ground.
+    /// landings where it flattens), each tread a box down into the ground. A short landing
+    /// at each end overlaps the connecting path, so stairs and paths join without gaps.
     fn stairs(&mut self, points: &[Vec2], width: f32, hm: &Heightmap) {
         const RISE: f32 = 0.16;
         const TREAD: f32 = 0.4;
+        const LANDING: f32 = 0.6;
         let half = width.max(1.2) / 2.0;
         let mut along = vec![0.0f32];
         for w in points.windows(2) {
@@ -518,25 +575,48 @@ impl Ribbons {
         if total < 0.5 {
             return;
         }
+        // Positions along the line, extended straight past both ends for the landings. The
+        // extension direction comes from a point at least 1 m back, so a tiny final segment
+        // (common where the steps meet a path) can't swing a landing sideways.
+        let n_pts = points.len();
+        let back = |from_end: bool| {
+            let anchor = if from_end { points[n_pts - 1] } else { points[0] };
+            let iter: Box<dyn Iterator<Item = &Vec2>> =
+                if from_end { Box::new(points.iter().rev()) } else { Box::new(points.iter()) };
+            let far = iter.skip(1).find(|p| p.distance(anchor) >= 1.0).copied().unwrap_or(if from_end { points[0] } else { points[n_pts - 1] });
+            (anchor - far).normalize_or(Vec2::X)
+        };
+        let (start_dir, end_dir) = (back(false), back(true));
         let point_at = |d: f32| {
-            let k = along.partition_point(|&a| a <= d).clamp(1, points.len() - 1);
+            if d < 0.0 {
+                return points[0] + start_dir * -d;
+            }
+            if d > total {
+                return points[n_pts - 1] + end_dir * (d - total);
+            }
+            let k = along.partition_point(|&a| a <= d).clamp(1, n_pts - 1);
             let t = (d - along[k - 1]) / (along[k] - along[k - 1]).max(1e-6);
             points[k - 1].lerp(points[k], t.clamp(0.0, 1.0))
         };
+        let h0 = hm.sample(points[0].x, points[0].y);
         let n = (total / TREAD).round().max(1.0) as usize;
         let tread = total / n as f32;
-        let h0 = hm.sample(points[0].x, points[0].y);
-        for k in 0..n {
-            let (d0, d1) = (k as f32 * tread, (k + 1) as f32 * tread);
+        let mut treads: Vec<(f32, f32, bool)> = vec![(-LANDING, 0.0, true)];
+        treads.extend((0..n).map(|k| (k as f32 * tread, (k + 1) as f32 * tread, false)));
+        treads.push((total, total + LANDING, true));
+        for (d0, d1, landing) in treads {
             let (p0, p1) = (point_at(d0), point_at(d1));
             let mid = point_at((d0 + d1) / 2.0);
-            let dir = (p1 - p0).normalize_or(Vec2::X);
+            // Direction over a longer stretch, so a tiny kink in the line can't twist a step.
+            let dir = (point_at((d1 + 0.8).min(total + LANDING)) - point_at((d0 - 0.8).max(-LANDING))).normalize_or(Vec2::X);
             let side = Vec2::new(-dir.y, dir.x) * half;
+            let (q0, q1) = (mid - dir * (d1 - d0) / 2.0, mid + dir * (d1 - d0) / 2.0);
             // Highest terrain under this tread (centre and both side edges), rounded up to a whole rise.
             let ground_top = [mid, mid + side, mid - side, p0, p1].iter().map(|p| hm.sample(p.x, p.y)).fold(f32::MIN, f32::max);
-            let top = h0 + ((ground_top - h0) / RISE).ceil() * RISE + 0.04;
+            // Landings sit flush with the path surface they join (paths float ~0.16 m up).
+            let top = if landing { ground_top + 0.19 } else { h0 + ((ground_top - h0) / RISE).ceil() * RISE + 0.04 };
             let ground = [p0, p1, p0 + side, p1 - side].iter().map(|p| hm.sample(p.x, p.y)).fold(f32::MAX, f32::min);
-            self.prism([p0 - side, p1 - side, p1 + side, p0 + side], ground - 0.4, top);
+            self.prism([q0 - side, q1 - side, q1 + side, q0 + side], ground - 0.4, top);
         }
     }
 
@@ -551,7 +631,10 @@ impl Ribbons {
         let total: f32 = points.windows(2).map(|w| w[0].distance(w[1])).sum();
         let mut along = 0.0;
         let mut next_pier = PIER_SPACING / 2.0;
-        for w in points.windows(2) {
+        let mut first = true;
+        let segments = points.len() - 1;
+        for (seg, w) in points.windows(2).enumerate() {
+            let last = seg + 1 == segments;
             let (a, b) = (w[0], w[1]);
             let len = a.distance(b);
             let n = (len / MAX_SEGMENT).ceil().max(1.0) as usize;
@@ -582,11 +665,25 @@ impl Ribbons {
                     let (r0, r1) = if s > 0.0 { (i0, i1) } else { (i1, i0) };
                     let (y_a, y_b) = if s > 0.0 { (top0, top1) } else { (top1, top0) };
                     self.quad(at(q0, y_a), at(q1, y_b), at(r1, y_b), at(r0, y_a));
+                    // Close the wall at the bridge's two ends.
+                    if first {
+                        self.quad(at(o0, bottom), at(i0, bottom), at(i0, top0), at(o0, top0));
+                    }
+                    if last && k == n - 1 {
+                        self.quad(at(i1, bottom), at(o1, bottom), at(o1, top1), at(i1, top1));
+                    }
                 }
-                // Slab underside, facing down.
+                // Slab underside, facing down, and its ends.
                 let at = |p: Vec2, y: f32| Vec3::new(p.x, y, p.y);
                 let (l0, l1, r0, r1) = (p0 + side * half, p1 + side * half, p0 - side * half, p1 - side * half);
                 self.quad(at(r0, y0 - SLAB), at(r1, y1 - SLAB), at(l1, y1 - SLAB), at(l0, y0 - SLAB));
+                if first {
+                    self.quad(at(l0, y0 - SLAB), at(r0, y0 - SLAB), at(r0, y0), at(l0, y0));
+                }
+                if last && k == n - 1 {
+                    self.quad(at(r1, y1 - SLAB), at(l1, y1 - SLAB), at(l1, y1), at(r1, y1));
+                }
+                first = false;
                 // Piers where the deck is well above the ground.
                 while next_pier <= d1 {
                     let p = a.lerp(b, ((next_pier - along) / len).clamp(0.0, 1.0));

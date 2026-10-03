@@ -7,7 +7,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use crate::ground::{GroundMaterial, GroundMaterialHandle, ground_material};
+use crate::ground::{GroundMaterial, GroundMaterialHandle, HeightTexture, create_height_texture, ground_material};
 use crate::level::{BinaryFile, Heightmap, Level, LevelHandles, LevelState};
 use crate::lod::LodChunk;
 
@@ -23,7 +23,7 @@ pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(LevelState::Ready), spawn_terrain);
+        app.add_systems(OnEnter(LevelState::Ready), spawn_terrain.after(create_height_texture));
     }
 }
 
@@ -35,9 +35,10 @@ fn spawn_terrain(
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<GroundMaterial>>,
+    height: Res<HeightTexture>,
 ) {
     let hm = &level.heightmap;
-    let Some(extension) = ground_material(&level, &handles, &files, &mut images) else {
+    let Some(extension) = ground_material(&level, &handles, &files, &mut images, &height) else {
         error!("Ground distance fields missing; run data/export_engine.py");
         return;
     };
