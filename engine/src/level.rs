@@ -47,6 +47,8 @@ pub struct LevelMeta {
     pub buildings: FileMeta,
     pub lines: FileMeta,
     pub water: FileMeta,
+    pub props: FileMeta,
+    pub barriers: FileMeta,
 }
 
 /// Raw bytes of a `.bin` file; decoded once all level files have arrived.
@@ -207,6 +209,8 @@ pub struct LevelHandles {
     pub lines: Option<Handle<BinaryFile>>,
     pub ground_sdf: Option<Handle<BinaryFile>>,
     pub water: Option<Handle<BinaryFile>>,
+    pub props: Option<Handle<BinaryFile>>,
+    pub barriers: Option<Handle<BinaryFile>>,
 }
 
 /// The loaded level, available once `LevelState::Ready` is reached.
@@ -239,6 +243,8 @@ impl Plugin for LevelPlugin {
                     lines: None,
                     ground_sdf: None,
                     water: None,
+                    props: None,
+                    barriers: None,
                 });
             })
             .add_systems(Update, request_data.run_if(in_state(LevelState::LoadingMeta)))
@@ -260,6 +266,8 @@ fn request_data(
     handles.lines = Some(assets.load(format!("{dir}/{}", meta.lines.file)));
     handles.ground_sdf = Some(assets.load(format!("{dir}/{}", meta.ground_sdf.file)));
     handles.water = Some(assets.load(format!("{dir}/{}", meta.water.file)));
+    handles.props = Some(assets.load(format!("{dir}/{}", meta.props.file)));
+    handles.barriers = Some(assets.load(format!("{dir}/{}", meta.barriers.file)));
     next.set(LevelState::LoadingData);
 }
 
@@ -279,7 +287,8 @@ fn finish_loading(
     };
     // Buildings and lines are decoded by their own plugins; just wait for them to arrive.
     let arrived = |h: &Option<Handle<BinaryFile>>| h.as_ref().is_some_and(|h| files.contains(h));
-    if ![&handles.buildings, &handles.lines, &handles.ground_sdf, &handles.water].into_iter().all(arrived) {
+    let files_needed = [&handles.buildings, &handles.lines, &handles.ground_sdf, &handles.water, &handles.props, &handles.barriers];
+    if !files_needed.into_iter().all(arrived) {
         return;
     }
     let heightmap = Heightmap::from_bytes(&meta.terrain, &meta.extent, &terrain.0);

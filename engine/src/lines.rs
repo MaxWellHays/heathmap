@@ -100,6 +100,40 @@ fn decode_lines(bytes: &[u8]) -> Vec<Line> {
 #[derive(Component)]
 pub struct Lines;
 
+/// A bridge deck you can walk on: centre line, width, and the straight height profile.
+pub struct Deck {
+    points: Vec<Vec2>,
+    half_width: f32,
+    h0: f32,
+    h1: f32,
+    total: f32,
+}
+
+/// All bridge decks, for walking over bridges (the terrain under them is the valley floor).
+#[derive(Resource, Default)]
+pub struct BridgeDecks(pub Vec<Deck>);
+
+impl BridgeDecks {
+    /// Height of the deck surface at `p`, if `p` is on a deck.
+    pub fn height_at(&self, p: Vec2) -> Option<f32> {
+        let mut best: Option<f32> = None;
+        for d in &self.0 {
+            let mut along = 0.0;
+            for w in d.points.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                let len = a.distance(b);
+                let t = ((p - a).dot(b - a) / (len * len).max(1e-6)).clamp(0.0, 1.0);
+                if p.distance(a.lerp(b, t)) <= d.half_width {
+                    let h = d.h0 + (d.h1 - d.h0) * ((along + t * len) / d.total.max(1e-3));
+                    best = Some(best.map_or(h, |x: f32| x.max(h)));
+                }
+                along += len;
+            }
+        }
+        best
+    }
+}
+
 /// Road and path material: standard textured surface plus optional elevation tint.
 pub type LinesMaterial = ExtendedMaterial<StandardMaterial, LineTint>;
 
@@ -127,6 +161,7 @@ pub struct LinesPlugin;
 impl Plugin for LinesPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<LinesMaterial>::default())
+            .init_resource::<BridgeDecks>()
             .add_systems(OnEnter(LevelState::Ready), spawn_lines.after(create_height_texture));
     }
 }
@@ -174,6 +209,7 @@ fn spawn_lines(
     mut materials: ResMut<Assets<LinesMaterial>>,
     mut targets: ResMut<ElevationTargets>,
     height: Res<HeightTexture>,
+    mut decks: ResMut<BridgeDecks>,
 ) {
     let Some(file) = handles.lines.as_ref().and_then(|h| files.get(h)) else { return };
     let lines = decode_lines(&file.0);
@@ -262,6 +298,8 @@ fn spawn_lines(
         }
         if let Some((h0, h1)) = deck {
             builders.entry((key, Look::Masonry)).or_default().bridge(&line.points, line.width, h0, h1, &heightmap);
+            let total = line.points.windows(2).map(|w| w[0].distance(w[1])).sum();
+            decks.0.push(Deck { points: line.points.clone(), half_width: line.width.max(2.0) / 2.0, h0, h1, total });
         }
         if has_centre_line(line) {
             let ribbons = builders.entry((key, Look::CentreLine)).or_default();
@@ -407,6 +445,8 @@ struct Ribbons {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
+    /// Only filled by `quad` (3D stairs and bridges, whose meshes use nothing else).
+    colors: Vec<[f32; 4]>,
     indices: Vec<u32>,
 }
 
@@ -531,10 +571,14 @@ impl Ribbons {
         }
         let i = self.positions.len() as u32;
         let (w, h) = (a.distance(b) / 2.0, a.distance(d) / 2.0);
+        // Baked shading: vertical faces (stair risers, walls) darker, undersides darker still,
+        // so steps read clearly even when the sun lights risers and treads alike.
+        let shade = if n.y.abs() < 0.5 { 0.68 } else if n.y < 0.0 { 0.55 } else { 1.0 };
         for (p, uv) in [(a, [0.0, 0.0]), (b, [w, 0.0]), (c, [w, h]), (d, [0.0, h])] {
             self.positions.push(p.to_array());
             self.normals.push(n.to_array());
             self.uvs.push(uv);
+            self.colors.push([shade, shade, shade, 1.0]);
         }
         self.indices.extend_from_slice(&[i, i + 1, i + 2, i, i + 2, i + 3]);
     }
@@ -701,11 +745,16 @@ impl Ribbons {
     }
 
     fn build(self) -> Mesh {
-        Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
+        let with_colors = !self.colors.is_empty() && self.colors.len() == self.positions.len();
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
             .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
             .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals)
             .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs)
-            .with_inserted_indices(Indices::U32(self.indices))
+            .with_inserted_indices(Indices::U32(self.indices));
+        if with_colors {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, self.colors);
+        }
+        mesh
     }
 }
 

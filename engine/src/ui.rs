@@ -11,6 +11,7 @@ use crate::buildings::Buildings;
 use crate::ground::ElevationSettings;
 use crate::camera::{CameraMode, ModeRequest, cursor_captured, keyboard_free};
 use crate::lines::Lines;
+use crate::props::{Barriers, Props};
 use crate::trees::Trees;
 
 /// What is drawn and where the sun is. Changed from the panel or keys (B, T).
@@ -19,6 +20,8 @@ pub struct LayerSettings {
     pub buildings: bool,
     pub trees: bool,
     pub roads: bool,
+    pub props: bool,
+    pub barriers: bool,
     pub shadows: bool,
     /// Direction the sunlight comes from, degrees clockwise from north.
     pub sun_azimuth: f32,
@@ -28,7 +31,7 @@ pub struct LayerSettings {
 
 impl Default for LayerSettings {
     fn default() -> Self {
-        Self { buildings: true, trees: true, roads: true, shadows: true, sun_azimuth: 225.0, sun_elevation: 35.0 }
+        Self { buildings: true, trees: true, roads: true, props: true, barriers: true, shadows: true, sun_azimuth: 225.0, sun_elevation: 35.0 }
     }
 }
 
@@ -120,6 +123,8 @@ fn panel(
             ui.checkbox(&mut layers.buildings, "Buildings  (B)");
             ui.checkbox(&mut layers.trees, "Trees  (T)");
             ui.checkbox(&mut layers.roads, "Roads and paths");
+            ui.checkbox(&mut layers.barriers, "Fences, walls and hedges");
+            ui.checkbox(&mut layers.props, "Benches, lamps, signs…");
             ui.checkbox(&mut layers.shadows, "Shadows");
             // Change detection on the settings resource should only fire on real edits.
             let mut e = elevation.clone();
@@ -214,9 +219,11 @@ fn apply_layers(
         Query<&mut Visibility, With<Buildings>>,
         Query<&mut Visibility, With<Trees>>,
         Query<&mut Visibility, With<Lines>>,
+        Query<&mut Visibility, With<Props>>,
+        Query<&mut Visibility, With<Barriers>>,
     )>,
     mut sun: Query<(&mut DirectionalLight, &mut Transform), With<Sun>>,
-    added: Query<(), Or<(Added<Buildings>, Added<Trees>, Added<Lines>)>>,
+    added: Query<(), Or<(Added<Buildings>, Added<Trees>, Added<Lines>, Added<Props>, Added<Barriers>)>>,
 ) {
     // Re-apply when settings change or when the layers appear (after level load).
     if !layers.is_changed() && added.is_empty() {
@@ -226,6 +233,8 @@ fn apply_layers(
     roots.p0().iter_mut().for_each(|mut v| *v = vis(layers.buildings));
     roots.p1().iter_mut().for_each(|mut v| *v = vis(layers.trees));
     roots.p2().iter_mut().for_each(|mut v| *v = vis(layers.roads));
+    roots.p3().iter_mut().for_each(|mut v| *v = vis(layers.props));
+    roots.p4().iter_mut().for_each(|mut v| *v = vis(layers.barriers));
     if let Ok((mut light, mut transform)) = sun.single_mut() {
         light.shadow_maps_enabled = layers.shadows;
         let (az, el) = (layers.sun_azimuth.to_radians(), layers.sun_elevation.to_radians());

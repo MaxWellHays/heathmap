@@ -13,6 +13,8 @@ Outputs in engine/assets/levels/heath/ (generated, not committed):
   buildings.bin  footprints with LIDAR heights (engine builds walls and roofs)
   lines.bin      road and path centre lines (engine drapes them on the terrain)
   water.bin      pond and lake outlines (engine builds flat water surfaces)
+  props.bin      benches, lamps, signals, bus stops, crossings, fountains… (oriented)
+  barriers.bin   fences, walls, hedges, retaining walls
 """
 
 import csv
@@ -336,6 +338,155 @@ def export_water(meta: dict) -> None:
     print(f"  water: {count} polygons")
 
 
+# Prop kinds shared with the engine (engine/src/props.rs).
+PROP_KINDS = {"bench": 0, "drinking_water": 1, "street_lamp": 2, "traffic_signals": 3, "bus_stop": 4,
+              "waste_basket": 5, "post_box": 6, "picnic_table": 7, "crossing": 8, "telephone": 9}
+ZEBRA_CROSSINGS = {"zebra", "uncontrolled", "marked"}
+
+
+def export_props(meta: dict) -> None:
+    """Street furniture and other small objects from OSM points, oriented sensibly.
+
+    Benches face the nearest path; traffic signals mapped on a road's centre line move to
+    its edge; bus stops face the road; crossings take the road's direction and width.
+    Format (little-endian): u32 count, then per prop:
+      u8 kind, u8 variant (bus stop: 1 = shelter), f32 x, f32 z, f32 yaw, f32 size.
+    yaw: rotation about the vertical so the prop's front (−z) faces that way;
+    size: crossing length across the road (m), otherwise 0.
+    """
+    from shapely import STRtree
+    from shapely.geometry import Point
+    from shapely.ops import nearest_points
+
+    lines, widths, is_road = [], [], []
+    for f in ogr_features("lines", "highway IS NOT NULL", "highway,other_tags"):
+        hw = f["properties"]["highway"]
+        if hw in ROAD_WIDTHS or hw in PATH_HIGHWAYS:
+            lines.append(shape(f["geometry"]))
+            widths.append(ROAD_WIDTHS.get(hw, 1.5))
+            is_road.append(hw in ROAD_WIDTHS and hw != "pedestrian")
+    road_idx = [i for i, r in enumerate(is_road) if r]
+    all_tree, road_tree = STRtree(lines), STRtree([lines[i] for i in road_idx])
+
+    def tangent(line, p):
+        d = line.project(p)
+        a, b = line.interpolate(max(d - 1.0, 0)), line.interpolate(min(d + 1.0, line.length))
+        v = np.array([b.x - a.x, b.y - a.y])
+        n = np.linalg.norm(v)
+        return v / n if n > 1e-6 else np.array([1.0, 0.0])
+
+    def yaw_towards(dx_bng, dy_bng):
+        # BNG direction -> engine yaw (x east, z south; front is −z).
+        dx, dz = dx_bng, -dy_bng
+        return float(np.arctan2(-dx, -dz))
+
+    out = bytearray(struct.pack("<I", 0))
+    count = 0
+    for f in ogr_features("points", "highway IS NOT NULL OR other_tags IS NOT NULL", "highway,other_tags"):
+        p = f["properties"]
+        tags = p.get("other_tags")
+        hw = p.get("highway")
+        amenity = tag(tags, "amenity")
+        if amenity in ("bench", "drinking_water", "waste_basket", "post_box", "telephone"):
+            kind = amenity
+        elif tag(tags, "leisure") == "picnic_table":
+            kind = "picnic_table"
+        elif hw in ("street_lamp", "traffic_signals", "bus_stop"):
+            kind = hw
+        elif hw == "crossing" and (tag(tags, "crossing") in ZEBRA_CROSSINGS or tag(tags, "crossing_ref") == "zebra"):
+            kind = "crossing"
+        else:
+            continue
+        pt = Point(f["geometry"]["coordinates"])
+        x, y = pt.x, pt.y
+        yaw, size, variant = 0.0, 0.0, 0
+        tree, idx_map = (road_tree, road_idx) if kind in ("traffic_signals", "bus_stop", "crossing") else (all_tree, None)
+        nearest = tree.nearest(pt)
+        if nearest is not None:
+            li = idx_map[nearest] if idx_map else nearest
+            line, width = lines[li], widths[li]
+            on_line = nearest_points(line, pt)[0]
+            dist = pt.distance(on_line)
+            t = tangent(line, on_line)
+            if kind == "crossing":
+                if dist < 3.0:
+                    yaw = yaw_towards(*t)  # stripes run along the road
+                    size = width
+                else:
+                    continue
+            elif dist < 12.0:
+                to_line = np.array([on_line.x - x, on_line.y - y])
+                if kind == "traffic_signals" and dist < width / 2:
+                    # Mapped in the road: move to its edge, on the side the point is on.
+                    side = np.array([-t[1], t[0]])
+                    if to_line.dot(side) > 0:
+                        side = -side
+                    x, y = on_line.x + side[0] * (width / 2 + 0.4), on_line.y + side[1] * (width / 2 + 0.4)
+                    to_line = np.array([on_line.x - x, on_line.y - y])
+                if np.linalg.norm(to_line) > 1e-3:
+                    yaw = yaw_towards(*to_line)  # face the path / road
+                else:
+                    yaw = yaw_towards(-t[1], t[0])
+        if kind == "bus_stop" and tag(tags, "shelter") == "yes":
+            variant = 1
+        lx, lz = to_local(x, y)
+        out += struct.pack("<BBffff", PROP_KINDS[kind], variant, lx, lz, yaw, size)
+        count += 1
+    struct.pack_into("<I", out, 0, count)
+    (LEVEL_DIR / "props.bin").write_bytes(out)
+    meta["props"] = {"file": "props.bin", "count": count, "kinds": PROP_KINDS}
+    print(f"  props: {count}")
+
+
+# Barrier kinds and materials shared with the engine (engine/src/props.rs).
+BARRIER_KINDS = {"fence": 0, "wire_fence": 0, "wall": 1, "city_wall": 1, "hedge": 2, "retaining_wall": 3}
+BARRIER_MATERIALS = {"metal": 1, "steel": 1, "iron": 1, "wood": 2, "brick": 3, "stone": 4, "concrete": 5}
+
+
+def export_barriers(meta: dict) -> None:
+    """Fences, walls, hedges and retaining walls (OSM barrier=*), lines and area outlines.
+
+    Format (little-endian): u32 count, then per barrier: u8 kind, u8 material,
+    f32 height (m, 0 = default for the kind), u32 vertex count, vertex count × (f32 x, f32 z).
+    """
+    out = bytearray(struct.pack("<I", 0))
+    count = 0
+    sources = [("lines", "barrier IS NOT NULL", "barrier,other_tags"),
+               ("multipolygons", "barrier IS NOT NULL", "barrier,other_tags")]
+    for layer, where, select in sources:
+        for f in ogr_features(layer, where, select):
+            p = f["properties"]
+            kind = BARRIER_KINDS.get(p.get("barrier"))
+            if kind is None:
+                continue
+            tags = p.get("other_tags")
+            material = BARRIER_MATERIALS.get(tag(tags, "material") or tag(tags, "fence_type") or "", 0)
+            if p["barrier"] == "wire_fence" or (tag(tags, "fence_type") or "").startswith(("metal", "railing", "chain")):
+                material = 1
+            try:
+                height = float((tag(tags, "height") or "0").rstrip(" m"))
+            except ValueError:
+                height = 0.0
+            g = shape(f["geometry"])
+            parts = []
+            if g.geom_type in ("Polygon", "MultiPolygon"):
+                for poly in (g.geoms if g.geom_type == "MultiPolygon" else [g]):
+                    parts.append(poly.exterior)
+            else:
+                parts = list(g.geoms) if g.geom_type == "MultiLineString" else [g]
+            for part in parts:
+                pts = list(part.coords)
+                if len(pts) < 2:
+                    continue
+                out += struct.pack("<BBfI", kind, material, min(height, 8.0), len(pts))
+                out += struct.pack(f"<{2 * len(pts)}f", *(v for x, y in pts for v in to_local(x, y)))
+                count += 1
+    struct.pack_into("<I", out, 0, count)
+    (LEVEL_DIR / "barriers.bin").write_bytes(out)
+    meta["barriers"] = {"file": "barriers.bin", "count": count}
+    print(f"  barriers: {count}")
+
+
 # Line kinds shared with the engine (engine/src/lines.rs).
 LINE_KINDS = {"road_major": 0, "road_minor": 1, "service": 2, "pedestrian": 3,
               "path_paved": 4, "path_unpaved": 5, "steps": 6, "track": 7}
@@ -414,6 +565,8 @@ def main() -> None:
     export_buildings(meta)
     export_lines(meta)
     export_water(meta)
+    export_props(meta)
+    export_barriers(meta)
     (LEVEL_DIR / "level.json").write_text(json.dumps(meta, indent=2) + "\n")
     sizes = {p.name: f"{p.stat().st_size / 1e6:.1f} MB" for p in sorted(LEVEL_DIR.iterdir())}
     print(f"Wrote {LEVEL_DIR}: {sizes}")

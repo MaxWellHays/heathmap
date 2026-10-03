@@ -20,6 +20,7 @@ use bevy_egui::input::EguiWantsInput;
 
 use crate::buildings::BuildingIndex;
 use crate::level::{Heightmap, Level, LevelState};
+use crate::lines::BridgeDecks;
 use crate::pick::{PickGrid, raycast, terrain_hit};
 
 const EYE_HEIGHT: f32 = 1.7;
@@ -165,7 +166,7 @@ fn spawn_camera(mut commands: Commands) {
         },
         // Screen-space contact shadows: small-scale detail the shadow map is too coarse for
         // (stair steps, kerbs, where things meet the ground). Needs a depth prepass.
-        ContactShadows { linear_steps: 16, thickness: 0.2, length: 0.8 },
+        ContactShadows { linear_steps: 24, thickness: 0.06, length: 0.5 },
     ));
 }
 
@@ -448,6 +449,7 @@ fn walk_player(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     hm: Res<Heightmap>,
+    decks: Option<Res<BridgeDecks>>,
     cams: Query<&ViewAngles>,
     mut players: Query<(&mut Player, &mut Transform)>,
 ) {
@@ -464,7 +466,12 @@ fn walk_player(
         player.airborne = true;
     }
     let mut p = transform.translation + step;
-    let ground = hm.sample(p.x, p.z);
+    let terrain = hm.sample(p.x, p.z);
+    // On a bridge deck (and not walking underneath it), the deck is the ground.
+    let ground = match decks.as_ref().and_then(|d| d.height_at(Vec2::new(p.x, p.z))) {
+        Some(deck) if deck > terrain && transform.translation.y > deck - 1.0 => deck,
+        _ => terrain,
+    };
     if player.airborne {
         player.vertical_speed -= GRAVITY * dt;
         p.y += player.vertical_speed * dt;
