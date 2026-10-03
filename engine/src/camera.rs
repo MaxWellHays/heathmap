@@ -25,7 +25,8 @@ use crate::lines::BridgeDecks;
 use crate::pick::{PickGrid, raycast, terrain_hit};
 
 const EYE_HEIGHT: f32 = 1.7;
-const WALK_SPEED: f32 = 2.2; // m/s (Shift: ×4.5 ≈ 10 m/s running)
+/// Default walk/third-person speed until your runs are loaded (then it's your average pace).
+const DEFAULT_RUNNER_SPEED: f32 = 2.5; // m/s
 const JUMP_SPEED: f32 = 4.8; // m/s upwards at take-off (about a 1 m jump)
 const GRAVITY: f32 = 12.0; // m/s²; a little above real gravity for a snappier, game-like jump
 const SHIFT_MULTIPLIER: f32 = 4.5;
@@ -63,6 +64,17 @@ impl CameraMode {
 
     pub fn captures_cursor(self) -> bool {
         self != CameraMode::Map
+    }
+}
+
+/// Speed of the player in walk / third person (m/s): your average running pace from your
+/// runs (see runs.rs), or a default. Shift multiplies it for getting around quickly.
+#[derive(Resource)]
+pub struct RunnerSpeed(pub f32);
+
+impl Default for RunnerSpeed {
+    fn default() -> Self {
+        Self(DEFAULT_RUNNER_SPEED)
     }
 }
 
@@ -127,6 +139,7 @@ impl Plugin for CameraPlugin {
         let no_tween = |t: Res<CameraTween>| t.0.is_none();
         app.init_state::<CameraMode>()
             .init_resource::<ModeRequest>()
+            .init_resource::<RunnerSpeed>()
             .init_resource::<CameraTween>()
             .add_systems(Startup, spawn_camera)
             .add_systems(OnEnter(LevelState::Ready), (place_on_level, spawn_player))
@@ -443,6 +456,7 @@ fn boost(keys: &ButtonInput<KeyCode>) -> f32 {
 fn walk_player(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    runner_speed: Res<RunnerSpeed>,
     hm: Res<Heightmap>,
     decks: Option<Res<BridgeDecks>>,
     landmarks: Option<Res<Landmarks>>,
@@ -450,7 +464,7 @@ fn walk_player(
     mut players: Query<(&mut Player, &mut Gait, &mut Transform)>,
 ) {
     let (Ok(angles), Ok((mut player, mut gait, mut transform))) = (cams.single(), players.single_mut()) else { return };
-    let step = Quat::from_rotation_y(angles.yaw) * move_input(&keys) * WALK_SPEED * boost(&keys) * time.delta_secs();
+    let step = Quat::from_rotation_y(angles.yaw) * move_input(&keys) * runner_speed.0 * boost(&keys) * time.delta_secs();
     if step != Vec3::ZERO {
         let target = (-step.x).atan2(-step.z);
         let diff = (target - player.heading + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;

@@ -12,7 +12,7 @@ use crate::ground::ElevationSettings;
 use crate::camera::{CameraMode, ModeRequest, cursor_captured, keyboard_free};
 use crate::lines::Lines;
 use crate::props::{Barriers, Props};
-use crate::runs::{RunPlayback, Runs};
+use crate::runs::{Race, RaceState, RunPlayback, Runs};
 use crate::trees::Trees;
 
 /// What is drawn and where the sun is. Changed from the panel or keys (B, T).
@@ -82,6 +82,7 @@ fn panel(
     mut bookmark_name: Local<String>,
     runs: Res<Runs>,
     mut playback: ResMut<RunPlayback>,
+    mut race: ResMut<Race>,
     mut styled: Local<bool>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -173,6 +174,35 @@ fn panel(
                     ui.label(egui::RichText::new(format!("{}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60)).small().color(MUTED));
                 });
                 ui.add(egui::Slider::new(&mut playback.speed, 1.0..=60.0).logarithmic(true).text("speed").suffix("×"));
+                // Racing your past runs from where you stand.
+                let button = if race.state == RaceState::Off { "Race my runs from here (G)" } else { "Stop race (G)" };
+                if ui.button(button).clicked() {
+                    race.toggle = true;
+                }
+                if let Some(msg) = &race.message {
+                    ui.label(egui::RichText::new(msg).small().italics().color(MUTED));
+                }
+                match race.state {
+                    RaceState::Off => {}
+                    RaceState::Ready => {
+                        ui.label(egui::RichText::new("Start moving to start the race").small().color(MUTED));
+                    }
+                    RaceState::Running => {
+                        let t = race.elapsed as u32;
+                        ui.label(egui::RichText::new(format!("Race time {}:{:02}", t / 60, t % 60)).small());
+                    }
+                }
+                for g in &race.ghosts {
+                    let run = &runs.0[g.run];
+                    let status = if g.finished {
+                        "finished".to_string()
+                    } else if g.gap_s >= 0.0 {
+                        format!("ahead by {:.0} s ({:.0} m)", g.gap_s, g.gap_m.abs())
+                    } else {
+                        format!("behind by {:.0} s ({:.0} m)", -g.gap_s, g.gap_m.abs())
+                    };
+                    ui.label(egui::RichText::new(format!("{} · {:.1} km: {status}", run.date(), run.length_km())).small());
+                }
                 ui.separator();
             }
 
@@ -216,8 +246,8 @@ fn panel(
             egui::CollapsingHeader::new(egui::RichText::new("Controls").color(MUTED)).default_open(false).show(ui, |ui| {
                 let help = match current {
                     CameraMode::Map => "Drag: move the point you grabbed\nRight drag / Ctrl+drag: orbit around it\nScroll: zoom towards the cursor",
-                    CameraMode::Walk => "WASD: walk, Shift: run (×4.5), Space: jump\nMouse: look around\nEsc: release the mouse",
-                    CameraMode::ThirdPerson => "WASD: walk, Shift: run (×4.5), Space: jump\nMouse: orbit the camera, scroll: zoom\nEsc: release the mouse",
+                    CameraMode::Walk => "WASD: run at your pace, Shift: ×4.5, Space: jump\nG: race your past runs from here\nMouse: look around, Esc: release the mouse",
+                    CameraMode::ThirdPerson => "WASD: run at your pace, Shift: ×4.5, Space: jump\nG: race your past runs from here\nMouse: orbit the camera, scroll: zoom\nEsc: release the mouse",
                     CameraMode::Fly => "WASD: fly, Space/C: up/down\nShift: ×4.5, scroll: speed\nMouse: look, Esc: release the mouse",
                 };
                 ui.label(egui::RichText::new(help).small());

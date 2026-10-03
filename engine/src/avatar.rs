@@ -1,5 +1,5 @@
-//! A simple low-poly runner for the player (and later for ghost runners): an articulated
-//! figure — pelvis, torso, head, two-part arms and legs, shoes — animated procedurally.
+//! The runner figure for the player and the ghost runners: an artist's wooden mannequin
+//! (oval segments joined by ball joints), animated procedurally.
 //! Stride frequency and amplitude follow the figure's speed, so it walks when slow and
 //! runs when fast (knees lift on the back swing, bent arms swing opposite to the legs,
 //! the body leans forward and bobs); in the air the knees tuck.
@@ -34,25 +34,33 @@ impl Plugin for AvatarPlugin {
     }
 }
 
+/// Colours for an artist's-mannequin figure: wooden segments and slightly darker joints.
 pub struct FigureColors {
-    pub shirt: Color,
-    pub shorts: Color,
-    pub skin: Color,
-    pub shoes: Color,
+    pub wood: Color,
+    pub joints: Color,
 }
 
 impl Default for FigureColors {
     fn default() -> Self {
-        Self {
-            shirt: Color::srgb(0.95, 0.45, 0.10),
-            shorts: Color::srgb(0.12, 0.13, 0.18),
-            skin: Color::srgb(0.85, 0.68, 0.55),
-            shoes: Color::srgb(0.92, 0.92, 0.92),
-        }
+        Self { wood: Color::srgb(0.85, 0.70, 0.52), joints: Color::srgb(0.70, 0.53, 0.36) }
     }
 }
 
-/// Adds a runner figure as children of `parent` (feet at the parent's origin, facing −z).
+impl FigureColors {
+    /// Wood stained towards `tint` (for ghost runners, one colour per run).
+    pub fn tinted(tint: Color) -> Self {
+        let base = Self::default();
+        let mix = |a: Color, t: f32| {
+            let (a, b) = (a.to_srgba(), tint.to_srgba());
+            Color::srgb(a.red + (b.red - a.red) * t, a.green + (b.green - a.green) * t, a.blue + (b.blue - a.blue) * t)
+        };
+        Self { wood: mix(base.wood, 0.6), joints: mix(base.joints, 0.45) }
+    }
+}
+
+/// Adds an artist's-mannequin runner as children of `parent` (feet at the parent's origin,
+/// facing −z): oval wooden segments (egg head, neck, chest, waist, pelvis, upper and lower
+/// limbs, mitten hands, feet) with ball joints, posed by `animate`.
 pub fn spawn_figure(
     commands: &mut Commands,
     parent: Entity,
@@ -60,47 +68,47 @@ pub fn spawn_figure(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) {
-    let mat = |c: Color, m: &mut Assets<StandardMaterial>| m.add(StandardMaterial { base_color: c, perceptual_roughness: 0.8, ..default() });
-    let (shirt, shorts, skin, shoes) = (
-        mat(colors.shirt, materials),
-        mat(colors.shorts, materials),
-        mat(colors.skin, materials),
-        mat(colors.shoes, materials),
-    );
-    let torso_mesh = meshes.add(Cuboid::new(0.34, 0.52, 0.2));
-    let hips_mesh = meshes.add(Cuboid::new(0.32, 0.16, 0.2));
-    let head_mesh = meshes.add(Sphere::new(0.11).mesh().ico(1).unwrap());
-    let upper_arm = meshes.add(Capsule3d::new(0.045, 0.22));
-    let lower_arm = meshes.add(Capsule3d::new(0.04, 0.2));
-    let thigh = meshes.add(Capsule3d::new(0.065, 0.32));
-    let shin = meshes.add(Capsule3d::new(0.05, 0.34));
-    let foot = meshes.add(Cuboid::new(0.1, 0.07, 0.24));
+    let wood = materials.add(StandardMaterial { base_color: colors.wood, perceptual_roughness: 0.45, reflectance: 0.35, ..default() });
+    let joint = materials.add(StandardMaterial { base_color: colors.joints, perceptual_roughness: 0.4, reflectance: 0.4, ..default() });
+    // Every segment is the same unit sphere, scaled into an ellipsoid.
+    let sphere = meshes.add(Sphere::new(1.0).mesh().uv(20, 14));
+    let part = |centre: Vec3, radii: Vec3| (Mesh3d(sphere.clone()), MeshMaterial3d(wood.clone()), Transform::from_translation(centre).with_scale(radii));
+    let ball = |centre: Vec3, r: f32| (Mesh3d(sphere.clone()), MeshMaterial3d(joint.clone()), Transform::from_translation(centre).with_scale(Vec3::splat(r)));
 
     let pelvis = commands
         .spawn((Joint::Pelvis, Transform::from_xyz(0.0, HIP_HEIGHT, 0.0), Visibility::Inherited))
         .with_children(|p| {
-            p.spawn((Mesh3d(hips_mesh), MeshMaterial3d(shorts.clone()), Transform::from_xyz(0.0, 0.02, 0.0)));
+            p.spawn(part(Vec3::new(0.0, 0.02, 0.0), Vec3::new(0.16, 0.1, 0.11)));
             // Torso pivots at the waist; head and arms hang off it.
             p.spawn((Joint::Torso, Transform::from_xyz(0.0, 0.08, 0.0), Visibility::Inherited)).with_children(|t| {
-                t.spawn((Mesh3d(torso_mesh), MeshMaterial3d(shirt.clone()), Transform::from_xyz(0.0, 0.26, 0.0)));
-                t.spawn((Mesh3d(head_mesh), MeshMaterial3d(skin.clone()), Transform::from_xyz(0.0, 0.66, 0.0)));
+                t.spawn(part(Vec3::new(0.0, 0.1, 0.0), Vec3::new(0.12, 0.1, 0.09))); // waist
+                t.spawn(part(Vec3::new(0.0, 0.34, 0.0), Vec3::new(0.17, 0.17, 0.11))); // chest
+                t.spawn(part(Vec3::new(0.0, 0.56, 0.0), Vec3::new(0.04, 0.06, 0.04))); // neck
+                t.spawn(part(Vec3::new(0.0, 0.7, 0.0), Vec3::new(0.085, 0.115, 0.1))); // head
                 for side in [-1.0f32, 1.0] {
-                    t.spawn((Joint::Shoulder(side), Transform::from_xyz(0.21 * side, 0.48, 0.0), Visibility::Inherited))
+                    t.spawn((Joint::Shoulder(side), Transform::from_xyz(0.2 * side, 0.46, 0.0), Visibility::Inherited))
                         .with_children(|s| {
-                            s.spawn((Mesh3d(upper_arm.clone()), MeshMaterial3d(shirt.clone()), Transform::from_xyz(0.0, -0.13, 0.0)));
+                            s.spawn(ball(Vec3::ZERO, 0.05));
+                            s.spawn(part(Vec3::new(0.0, -0.14, 0.0), Vec3::new(0.045, 0.13, 0.045)));
                             s.spawn((Joint::Elbow(side), Transform::from_xyz(0.0, -0.28, 0.0), Visibility::Inherited))
                                 .with_children(|e| {
-                                    e.spawn((Mesh3d(lower_arm.clone()), MeshMaterial3d(skin.clone()), Transform::from_xyz(0.0, -0.13, 0.0)));
+                                    e.spawn(ball(Vec3::ZERO, 0.035));
+                                    e.spawn(part(Vec3::new(0.0, -0.13, 0.0), Vec3::new(0.038, 0.12, 0.038)));
+                                    e.spawn(ball(Vec3::new(0.0, -0.25, 0.0), 0.025)); // wrist
+                                    e.spawn(part(Vec3::new(0.0, -0.31, 0.0), Vec3::new(0.035, 0.06, 0.022))); // hand
                                 });
                         });
                 }
             });
             for side in [-1.0f32, 1.0] {
-                p.spawn((Joint::Hip(side), Transform::from_xyz(0.1 * side, 0.0, 0.0), Visibility::Inherited)).with_children(|h| {
-                    h.spawn((Mesh3d(thigh.clone()), MeshMaterial3d(shorts.clone()), Transform::from_xyz(0.0, -0.21, 0.0)));
+                p.spawn((Joint::Hip(side), Transform::from_xyz(0.09 * side, 0.0, 0.0), Visibility::Inherited)).with_children(|h| {
+                    h.spawn(ball(Vec3::ZERO, 0.055));
+                    h.spawn(part(Vec3::new(0.0, -0.22, 0.0), Vec3::new(0.065, 0.2, 0.065)));
                     h.spawn((Joint::Knee(side), Transform::from_xyz(0.0, -0.44, 0.0), Visibility::Inherited)).with_children(|k| {
-                        k.spawn((Mesh3d(shin.clone()), MeshMaterial3d(skin.clone()), Transform::from_xyz(0.0, -0.22, 0.0)));
-                        k.spawn((Mesh3d(foot.clone()), MeshMaterial3d(shoes.clone()), Transform::from_xyz(0.0, -0.45, -0.05)));
+                        k.spawn(ball(Vec3::ZERO, 0.045));
+                        k.spawn(part(Vec3::new(0.0, -0.21, 0.0), Vec3::new(0.05, 0.19, 0.05)));
+                        k.spawn(ball(Vec3::new(0.0, -0.42, 0.0), 0.035)); // ankle
+                        k.spawn(part(Vec3::new(0.0, -0.46, -0.05), Vec3::new(0.045, 0.03, 0.11))); // foot
                     });
                 });
             }
