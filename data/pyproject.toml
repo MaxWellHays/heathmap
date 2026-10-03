@@ -3,6 +3,7 @@ name = "heathmap-data"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
+    "mapbox-earcut>=2.1.0",
     "mercantile>=1.2.1",
     "numpy>=2.5.3",
     "osm2geojson>=0.3.2",
@@ -13,4 +14,5 @@ dependencies = [
     "scikit-image>=0.26.0",
     "scipy>=1.18.1",
     "shapely>=2.1.2",
+    "trimesh>=5.1.1",
 ]
