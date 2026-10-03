@@ -17,7 +17,8 @@ use crate::lod::LodChunk;
 use crate::textures::image_with_mips;
 
 const CHUNK: f32 = 512.0;
-const MAX_SEGMENT: f32 = 3.0; // m; ribbons are resampled this finely to follow the terrain
+const MAX_SEGMENT: f32 = 2.0; // m; ribbons are resampled this finely along their length…
+const ACROSS_SPACING: f32 = 1.5; // m; …and across their width, to follow the terrain
 const DRAW_DISTANCE: [f32; 1] = [3000.0];
 const CENTRE_LINE_WIDTH: f32 = 0.15;
 /// Centre lines stop this far from junctions, as painted lines do.
@@ -45,10 +46,10 @@ impl Kind {
     /// Height above the terrain; wider/more important lines sit on top at junctions.
     fn lift(self) -> f32 {
         match self {
-            Kind::RoadMajor => 0.16,
-            Kind::RoadMinor => 0.14,
-            Kind::Service | Kind::Pedestrian => 0.12,
-            _ => 0.10,
+            Kind::RoadMajor => 0.24,
+            Kind::RoadMinor => 0.22,
+            Kind::Service | Kind::Pedestrian => 0.20,
+            _ => 0.16,
         }
     }
 
@@ -299,6 +300,7 @@ impl Ribbons {
         if pts.len() < 2 {
             return;
         }
+        let cols = ((width / ACROSS_SPACING).ceil() as usize + 1).max(2);
         let start = self.positions.len() as u32;
         let mut along = 0.0;
         for i in 0..pts.len() {
@@ -312,22 +314,29 @@ impl Ribbons {
             let normal = Vec2::new(-tangent.y, tangent.x);
             let seg_normal = Vec2::new(-dir_out.y, dir_out.x).normalize_or(Vec2::new(-dir_in.y, dir_in.x));
             let mitre = 1.0 / normal.dot(seg_normal).abs().max(0.5);
-            for (side, u) in [(-1.0, 0.0), (1.0, 1.0)] {
-                let p = pts[i] + normal * (half * mitre * side);
+            // Vertices across the width too, so the strip follows the terrain sideways
+            // (road camber, terrain triangle folds) instead of letting it poke through.
+            for k in 0..cols {
+                let u = k as f32 / (cols - 1) as f32;
+                let p = pts[i] + normal * (half * mitre * (2.0 * u - 1.0));
                 self.positions.push([p.x, hm.sample(p.x, p.y) + lift, p.y]);
                 self.normals.push([0.0, 1.0, 0.0]);
                 self.uvs.push([u, along / repeat]);
             }
         }
+        let cols32 = cols as u32;
         for i in 0..pts.len() as u32 - 1 {
-            let (l0, r0, l1, r1) = (start + 2 * i, start + 2 * i + 1, start + 2 * i + 2, start + 2 * i + 3);
-            // Wind both triangles to face up regardless of the line's direction.
-            let up = |a: u32, b: u32, c: u32| {
-                let p = |k: u32| Vec3::from_array(self.positions[k as usize]);
-                (p(b) - p(a)).cross(p(c) - p(a)).y >= 0.0
-            };
-            for (a, b, c) in [(l0, r0, l1), (r0, r1, l1)] {
-                if up(a, b, c) { self.indices.extend_from_slice(&[a, b, c]) } else { self.indices.extend_from_slice(&[a, c, b]) }
+            for k in 0..cols32 - 1 {
+                let (l0, r0) = (start + i * cols32 + k, start + i * cols32 + k + 1);
+                let (l1, r1) = (l0 + cols32, r0 + cols32);
+                // Wind both triangles to face up regardless of the line's direction.
+                let up = |a: u32, b: u32, c: u32| {
+                    let p = |k: u32| Vec3::from_array(self.positions[k as usize]);
+                    (p(b) - p(a)).cross(p(c) - p(a)).y >= 0.0
+                };
+                for (a, b, c) in [(l0, r0, l1), (r0, r1, l1)] {
+                    if up(a, b, c) { self.indices.extend_from_slice(&[a, b, c]) } else { self.indices.extend_from_slice(&[a, c, b]) }
+                }
             }
         }
     }
@@ -346,11 +355,22 @@ impl Ribbons {
             self.normals.push([0.0, 1.0, 0.0]);
             self.uvs.push([0.5, 0.0]);
         }
+        // Inner ring at half radius, so the disc follows the terrain rather than spanning it flat.
+        for k in 0..SIDES {
+            let a = k as f32 / SIDES as f32 * std::f32::consts::TAU;
+            let p = centre + Vec2::new(a.cos(), a.sin()) * radius * 0.5;
+            self.positions.push([p.x, hm.sample(p.x, p.y) + lift, p.y]);
+            self.normals.push([0.0, 1.0, 0.0]);
+            self.uvs.push([0.5, 0.0]);
+        }
+        let (outer, inner) = (start + 1, start + 1 + SIDES as u32);
         for k in 0..SIDES as u32 {
-            // Angles increase from +x towards +z (south), i.e. clockwise seen from above:
-            // centre, next, current is counter-clockwise from above, so it faces up.
-            let (cur, next) = (start + 1 + k, start + 1 + (k + 1) % SIDES as u32);
-            self.indices.extend_from_slice(&[start, next, cur]);
+            // Angles increase from +x towards +z (south), i.e. clockwise seen from above, so
+            // (centre, next, current) is counter-clockwise from above and faces up.
+            let next = (k + 1) % SIDES as u32;
+            self.indices.extend_from_slice(&[start, inner + next, inner + k]);
+            self.indices.extend_from_slice(&[inner + k, inner + next, outer + next]);
+            self.indices.extend_from_slice(&[inner + k, outer + next, outer + k]);
         }
     }
 
