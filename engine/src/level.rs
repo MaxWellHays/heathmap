@@ -12,6 +12,7 @@ pub struct TerrainMeta {
     pub height: usize,
     pub resolution: f32,
     pub min_ele: f32,
+    #[allow(dead_code)]
     pub max_ele: f32,
 }
 
@@ -35,6 +36,7 @@ pub struct LevelMeta {
     pub ground: FileMeta,
     pub trees: FileMeta,
     pub buildings: FileMeta,
+    pub lines: FileMeta,
 }
 
 /// Raw bytes of a `.bin` file; decoded once all level files have arrived.
@@ -115,15 +117,44 @@ impl Heightmap {
         Vec3::new(p.x, self.at_index(col, row), p.y)
     }
 
-    /// Bilinearly interpolated terrain height at a world (x, z) position.
+    /// Like `sample`, but on the coarser grid used by a terrain LOD with this sample step
+    /// (chunk origins are multiples of every step, so the grids line up with the meshes).
+    pub fn sample_step(&self, x: f32, z: f32, step: usize) -> f32 {
+        if step <= 1 {
+            return self.sample(x, z);
+        }
+        let s = step as f32;
+        let fx = ((x - self.origin.x) / self.resolution / s).max(0.0);
+        let fz = ((z - self.origin.y) / self.resolution / s).max(0.0);
+        let (c, r) = (fx.floor(), fz.floor());
+        let (tx, tz) = (fx - c, fz - r);
+        let at = |cc: f32, rr: f32| self.at_index((cc * s) as usize, (rr * s) as usize);
+        let (a, b, cc) = (at(c, r), at(c + 1.0, r), at(c, r + 1.0));
+        if tx + tz <= 1.0 {
+            a + (b - a) * tx + (cc - a) * tz
+        } else {
+            let d = at(c + 1.0, r + 1.0);
+            d + (cc - d) * (1.0 - tx) + (b - d) * (1.0 - tz)
+        }
+    }
+
+    /// Terrain height at a world (x, z) position, interpolated on the same triangles as
+    /// the full-detail terrain mesh (each cell split along its NE–SW diagonal), so things
+    /// placed with it sit exactly on the visible surface.
     pub fn sample(&self, x: f32, z: f32) -> f32 {
         let fx = ((x - self.origin.x) / self.resolution).clamp(0.0, (self.width - 1) as f32);
         let fz = ((z - self.origin.y) / self.resolution).clamp(0.0, (self.height - 1) as f32);
         let (c, r) = (fx.floor() as usize, fz.floor() as usize);
         let (tx, tz) = (fx - c as f32, fz - r as f32);
-        let top = self.at_index(c, r) * (1.0 - tx) + self.at_index(c + 1, r) * tx;
-        let bottom = self.at_index(c, r + 1) * (1.0 - tx) + self.at_index(c + 1, r + 1) * tx;
-        top * (1.0 - tz) + bottom * tz
+        let a = self.at_index(c, r); // north-west
+        let b = self.at_index(c + 1, r); // north-east
+        let cc = self.at_index(c, r + 1); // south-west
+        if tx + tz <= 1.0 {
+            a + (b - a) * tx + (cc - a) * tz
+        } else {
+            let d = self.at_index(c + 1, r + 1); // south-east
+            d + (cc - d) * (1.0 - tx) + (b - d) * (1.0 - tz)
+        }
     }
 }
 
@@ -132,6 +163,7 @@ impl Heightmap {
 pub struct Tree {
     pub x: f32,
     pub z: f32,
+    #[allow(dead_code)] // trees are placed on the rendered terrain instead
     pub ground: f32,
     pub height: f32,
     pub crown_radius: f32,
@@ -161,6 +193,8 @@ pub struct LevelHandles {
     pub meta: Handle<LevelMeta>,
     pub terrain: Option<Handle<BinaryFile>>,
     pub trees: Option<Handle<BinaryFile>>,
+    pub buildings: Option<Handle<BinaryFile>>,
+    pub lines: Option<Handle<BinaryFile>>,
 }
 
 /// The loaded level, available once `LevelState::Ready` is reached.
@@ -190,6 +224,8 @@ impl Plugin for LevelPlugin {
                     dir: dir.clone(),
                     terrain: None,
                     trees: None,
+                    buildings: None,
+                    lines: None,
                 });
             })
             .add_systems(Update, request_data.run_if(in_state(LevelState::LoadingMeta)))
@@ -207,6 +243,8 @@ fn request_data(
     let dir = handles.dir.clone();
     handles.terrain = Some(assets.load(format!("{dir}/{}", meta.terrain.file)));
     handles.trees = Some(assets.load(format!("{dir}/{}", meta.trees.file)));
+    handles.buildings = Some(assets.load(format!("{dir}/{}", meta.buildings.file)));
+    handles.lines = Some(assets.load(format!("{dir}/{}", meta.lines.file)));
     next.set(LevelState::LoadingData);
 }
 
@@ -224,6 +262,11 @@ fn finish_loading(
     ) else {
         return;
     };
+    // Buildings and lines are decoded by their own plugins; just wait for them to arrive.
+    let arrived = |h: &Option<Handle<BinaryFile>>| h.as_ref().is_some_and(|h| files.contains(h));
+    if !arrived(&handles.buildings) || !arrived(&handles.lines) {
+        return;
+    }
     let heightmap = Heightmap::from_bytes(&meta.terrain, &meta.extent, &terrain.0);
     let trees = decode_trees(&trees.0);
     info!("Level '{}' loaded: {}×{} terrain, {} trees", meta.name, heightmap.width, heightmap.height, trees.len());

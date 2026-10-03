@@ -8,6 +8,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::level::{Heightmap, Level, LevelState};
+use crate::lod::LodChunk;
 
 /// Samples per chunk side (×4 m = 512 m).
 const CHUNK_SAMPLES: usize = 128;
@@ -17,18 +18,11 @@ const LOD_STEPS: [usize; 4] = [1, 2, 4, 8];
 const LOD_DISTANCES: [f32; 3] = [700.0, 1500.0, 3000.0];
 const SKIRT_DEPTH: f32 = 8.0;
 
-#[derive(Component)]
-pub struct TerrainChunk {
-    center: Vec3,
-    lods: Vec<Entity>,
-}
-
 pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(LevelState::Ready), spawn_terrain)
-            .add_systems(Update, select_lod.run_if(in_state(LevelState::Ready)));
+        app.add_systems(OnEnter(LevelState::Ready), spawn_terrain);
     }
 }
 
@@ -71,12 +65,29 @@ fn spawn_terrain(
                 })
                 .collect::<Vec<_>>();
             commands
-                .spawn((TerrainChunk { center, lods: lods.clone() }, Transform::default(), Visibility::default()))
+                .spawn((
+                    LodChunk { center, levels: lods.clone(), distances: &LOD_DISTANCES },
+                    Transform::default(),
+                    Visibility::default(),
+                ))
                 .add_children(&lods);
             count += 1;
         }
     }
     info!("Spawned {count} terrain chunks × {} LODs", LOD_STEPS.len());
+}
+
+/// Sample step of the terrain LOD currently drawn at (x, z) for a camera at `eye`
+/// (mirrors the chunking and the LOD selection), so picking hits what is on screen.
+pub fn rendered_step(hm: &Heightmap, eye: Vec3, x: f32, z: f32) -> usize {
+    let col = ((x - hm.origin.x) / hm.resolution).clamp(0.0, (hm.width - 1) as f32) as usize;
+    let row = ((z - hm.origin.y) / hm.resolution).clamp(0.0, (hm.height - 1) as f32) as usize;
+    let (col0, row0) = (col / CHUNK_SAMPLES * CHUNK_SAMPLES, row / CHUNK_SAMPLES * CHUNK_SAMPLES);
+    let cols = CHUNK_SAMPLES.min(hm.width - 1 - col0);
+    let rows = CHUNK_SAMPLES.min(hm.height - 1 - row0);
+    let center = hm.world_pos(col0 + cols / 2, row0 + rows / 2);
+    let lod = LOD_DISTANCES.iter().take_while(|&&limit| eye.distance(center) > limit).count();
+    LOD_STEPS[lod]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -162,23 +173,4 @@ fn normal_at(hm: &Heightmap, c: usize, r: usize) -> Vec3 {
     let u = hm.at_index(c, r.saturating_sub(1));
     let d = hm.at_index(c, r + 1);
     Vec3::new(l - rr, 2.0 * hm.resolution, u - d).normalize()
-}
-
-fn select_lod(
-    camera: Query<&GlobalTransform, With<Camera3d>>,
-    chunks: Query<&TerrainChunk>,
-    mut visibility: Query<&mut Visibility>,
-) {
-    let Ok(cam) = camera.single() else { return };
-    let eye = cam.translation();
-    for chunk in &chunks {
-        let d = eye.distance(chunk.center);
-        let lod = LOD_DISTANCES.iter().take_while(|&&limit| d > limit).count();
-        for (i, &e) in chunk.lods.iter().enumerate() {
-            if let Ok(mut v) = visibility.get_mut(e) {
-                let want = if i == lod { Visibility::Inherited } else { Visibility::Hidden };
-                v.set_if_neq(want);
-            }
-        }
-    }
 }

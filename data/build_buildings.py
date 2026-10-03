@@ -6,9 +6,13 @@ percentile of the normalised surface (DSM − DTM) inside each footprint, which 
 robust to stray LIDAR returns and to parts of the footprint at ground level
 (courtyards, slight mapping misalignment). OSM's own height tags are sparse in London.
 
+The median is stored too: on a pitched roof LIDAR heights spread evenly between the
+eaves and the ridge, so p90 − p50 is large (≈ 0.4 × ridge rise for a simple gable);
+on a flat roof the two are nearly equal. The engine uses this to choose roof shapes.
+
 Outputs (build/, British National Grid):
   ndsm_1m.tif             height above ground of everything (also used by build_trees.py)
-  buildings.geojson       footprints with `osm_id`, `name`, `height` (m), `ground` (m, DTM at base)
+  buildings.geojson       footprints with `osm_id`, `name`, `height` (m, p90), `height_p50` (m), `ground` (m, DTM at base)
 """
 
 import json
@@ -78,7 +82,8 @@ def main() -> None:
         cells = order[starts[i]:starts[i + 1]]
         if len(cells) == 0:  # footprint smaller than one cell
             continue
-        height = float(np.percentile(ndsm.ravel()[cells], HEIGHT_PERCENTILE))
+        values = ndsm.ravel()[cells]
+        height, median = (float(v) for v in np.percentile(values, [HEIGHT_PERCENTILE, 50]))
         if height < MIN_HEIGHT:
             continue
         p = f["properties"]
@@ -86,7 +91,7 @@ def main() -> None:
         out_features.append({
             "type": "Feature",
             "properties": {"osm_id": osm_id, "name": p.get("name"), "building": p.get("building"),
-                           "height": round(height, 1),
+                           "height": round(height, 1), "height_p50": round(median, 1),
                            "ground": round(float(np.nanmin(ground.ravel()[cells])), 1)},
             "geometry": mapping(g),
         })

@@ -10,17 +10,18 @@ Outputs in engine/assets/levels/heath/ (generated, not committed):
                  elevation = min_ele + value / 100 (centimetre steps)
   ground.png     top-down colour map covering the terrain extent (same orientation)
   trees.bin      f32 little-endian records: x, z, ground, height, crown_radius
-  buildings.glb  extruded footprints, one mesh per 1 km chunk, flat roofs
+  buildings.bin  footprints with LIDAR heights (engine builds walls and roofs)
+  lines.bin      road and path centre lines (engine drapes them on the terrain)
 """
 
 import csv
 import json
 import re
+import struct
 import subprocess
 
 import numpy as np
 import rasterio
-import trimesh
 from PIL import Image
 from rasterio.enums import Resampling
 from rasterio.features import rasterize
@@ -34,7 +35,6 @@ LEVEL_DIR = ROOT.parent / "engine" / "assets" / "levels" / "heath"
 ORIGIN = ((BBOX_BNG[0] + BBOX_BNG[2]) / 2, (BBOX_BNG[1] + BBOX_BNG[3]) / 2)  # BNG metres
 TERRAIN_RES = 4.0  # metres per heightmap sample
 GROUND_RES = 2.0  # metres per ground texture pixel (4000 × 3500 px; under WebGL2's 4096 limit)
-CHUNK = 1000  # metres, building mesh chunks
 
 # Ground colours, painted in this order (later entries cover earlier ones).
 GROUND_LAYERS = [
@@ -171,35 +171,97 @@ def export_trees(meta: dict) -> None:
 
 
 def export_buildings(meta: dict) -> None:
+    """Footprints with LIDAR heights; the engine extrudes walls and builds roofs.
+
+    Format (little-endian): u32 count, then per building:
+      f32 ground, f32 height (p90 above ground), f32 height_p50, u16 ring count,
+      per ring: u32 vertex count, vertex count × (f32 x, f32 z). Ring 0 is the outer ring.
+    """
     features = json.loads((BUILD_DIR / "buildings.geojson").read_text())["features"]
-    chunks: dict[tuple[int, int], list[trimesh.Trimesh]] = {}
+    out = bytearray(struct.pack("<I", 0))
+    count = 0
     for f in features:
-        g = shp_transform(lambda x, y, z=None: to_local(x, y), shape(f["geometry"]))
         p = f["properties"]
-        polys = list(g.geoms) if g.geom_type == "MultiPolygon" else [g]
-        for poly in polys:
+        g = shape(f["geometry"])
+        for poly in (g.geoms if g.geom_type == "MultiPolygon" else [g]):
             if poly.area < 4:
                 continue
-            try:
-                m = trimesh.creation.extrude_polygon(poly.buffer(0), height=p["height"])
-            except Exception:
+            rings = [poly.exterior, *poly.interiors]
+            out += struct.pack("<fffH", p["ground"], p["height"], p.get("height_p50", p["height"]), len(rings))
+            for ring in rings:
+                pts = list(ring.coords)[:-1]  # drop the closing duplicate
+                out += struct.pack("<I", len(pts))
+                out += struct.pack(f"<{2 * len(pts)}f", *(v for x, y in pts for v in to_local(x, y)))
+            count += 1
+    struct.pack_into("<I", out, 0, count)
+    (LEVEL_DIR / "buildings.bin").write_bytes(out)
+    meta["buildings"] = {"file": "buildings.bin", "count": count}
+    print(f"  buildings: {count}")
+
+
+# Line kinds shared with the engine (engine/src/lines.rs).
+LINE_KINDS = {"road_major": 0, "road_minor": 1, "service": 2, "pedestrian": 3,
+              "path_paved": 4, "path_unpaved": 5, "steps": 6, "track": 7}
+MINOR_ROADS = {"tertiary", "residential", "unclassified", "living_street"}
+
+
+def export_lines(meta: dict) -> None:
+    """Road and path centre lines; the engine drapes them on the terrain as ribbons.
+
+    Format (little-endian): u32 count, then per line:
+      u8 kind, u8 flags (1 = oneway, 2 = bridge), u8 lanes (0 = unknown), f32 width (m),
+      u32 vertex count, vertex count × (f32 x, f32 z).
+    """
+    lines = ogr_features("lines", "highway IS NOT NULL", "highway,other_tags")
+    out = bytearray(struct.pack("<I", 0))
+    count = 0
+    for f in lines:
+        hw = f["properties"]["highway"]
+        tags = f["properties"].get("other_tags")
+        if tag(tags, "tunnel") in ("yes", "building_passage") or tag(tags, "layer") in ("-1", "-2"):
+            continue
+        surface = tag(tags, "surface")
+        if hw in MAJOR_ROADS:
+            kind = "road_major"
+        elif hw in MINOR_ROADS:
+            kind = "road_minor"
+        elif hw == "service":
+            kind = "service"
+        elif hw == "pedestrian":
+            kind = "pedestrian"
+        elif hw == "steps":
+            kind = "steps"
+        elif hw == "track":
+            kind = "track"
+        elif hw in PATH_HIGHWAYS:
+            if tag(tags, "footway") in ("sidewalk", "crossing"):
+                continue  # drawn as part of the road
+            kind = "path_paved" if surface in PAVED else "path_unpaved"
+        else:
+            continue
+        lanes_tag = tag(tags, "lanes")
+        lanes = int(lanes_tag) if lanes_tag and lanes_tag.isdigit() else 0
+        width_tag = tag(tags, "width")
+        try:
+            width = float(width_tag.rstrip(" m")) if width_tag else 0.0
+        except ValueError:
+            width = 0.0
+        if not width:
+            width = (lanes * 3.2 + 1.0) if lanes and kind.startswith("road") else \
+                ROAD_WIDTHS.get(hw, {"track": 3.0, "steps": 2.0, "path_paved": 2.0}.get(kind, 1.5))
+        flags = (1 if tag(tags, "oneway") == "yes" else 0) | (2 if tag(tags, "bridge") else 0)
+        g = shape(f["geometry"])
+        for line in (g.geoms if g.geom_type == "MultiLineString" else [g]):
+            pts = list(line.coords)
+            if len(pts) < 2:
                 continue
-            # extrude_polygon builds in (x, y, up); engine wants (x, up, z) with z = the polygon's y.
-            v = m.vertices
-            m.vertices = np.column_stack([v[:, 0], v[:, 2] + p["ground"], v[:, 1]])
-            m.invert()  # swapping axes mirrors the mesh; restore outward-facing winding
-            c = poly.centroid
-            key = (int(np.floor(c.x / CHUNK)), int(np.floor(c.y / CHUNK)))
-            chunks.setdefault(key, []).append(m)
-    scene = trimesh.Scene()
-    for (cx, cz), meshes in sorted(chunks.items()):
-        merged = trimesh.util.concatenate(meshes)
-        merged.visual = trimesh.visual.ColorVisuals(merged, face_colors=[214, 205, 192, 255])
-        scene.add_geometry(merged, node_name=f"buildings_{cx}_{cz}", geom_name=f"buildings_{cx}_{cz}")
-    scene.export(LEVEL_DIR / "buildings.glb")
-    tris = sum(len(g.faces) for g in scene.geometry.values())
-    meta["buildings"] = {"file": "buildings.glb", "count": len(features), "chunks": len(chunks), "triangles": tris}
-    print(f"  buildings: {len(features)} in {len(chunks)} chunks, {tris} triangles")
+            out += struct.pack("<BBBfI", LINE_KINDS[kind], flags, min(lanes, 255), width, len(pts))
+            out += struct.pack(f"<{2 * len(pts)}f", *(v for x, y in pts for v in to_local(x, y)))
+            count += 1
+    struct.pack_into("<I", out, 0, count)
+    (LEVEL_DIR / "lines.bin").write_bytes(out)
+    meta["lines"] = {"file": "lines.bin", "count": count, "kinds": LINE_KINDS}
+    print(f"  lines: {count}")
 
 
 def main() -> None:
@@ -212,6 +274,7 @@ def main() -> None:
     export_ground(meta)
     export_trees(meta)
     export_buildings(meta)
+    export_lines(meta)
     (LEVEL_DIR / "level.json").write_text(json.dumps(meta, indent=2) + "\n")
     sizes = {p.name: f"{p.stat().st_size / 1e6:.1f} MB" for p in sorted(LEVEL_DIR.iterdir())}
     print(f"Wrote {LEVEL_DIR}: {sizes}")
