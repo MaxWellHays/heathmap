@@ -51,7 +51,11 @@ fn main() {
     std::panic::set_hook(Box::new(|info| web_sys::console::error_1(&info.to_string().into())));
 
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+    app.add_plugins(DefaultPlugins.set(AssetPlugin {
+        // There are no .meta files; without this the browser requests one per asset (each a 404).
+        meta_check: bevy::asset::AssetMetaCheck::Never,
+        ..default()
+    }).set(WindowPlugin {
         primary_window: Some(Window {
             title: "heathmap".into(),
             canvas: Some("#heathmap".into()),
