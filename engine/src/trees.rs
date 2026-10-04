@@ -19,7 +19,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
 
-use crate::level::{Heightmap, Level, Tree, spawn_step};
+use crate::level::{Heightmap, Level, Tree, spawn_step, SpawnSequence};
 use crate::lod::LodChunk;
 
 const CHUNK: f32 = 256.0;
@@ -73,6 +73,7 @@ fn spawn_trees(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut sprite_materials: ResMut<Assets<TreeSpriteMaterial>>,
+    mut seq: ResMut<SpawnSequence>,
 ) {
     let material = materials.add(StandardMaterial { perceptual_roughness: 0.9, reflectance: 0.05, ..default() });
     let sprite_material = sprite_materials.add(TreeSpriteMaterial {
@@ -130,6 +131,7 @@ fn spawn_trees(
             .id();
         commands.entity(root).add_child(chunk);
     }
+    seq.done();
     info!(
         "Spawned {} trees in {} chunks; triangles per LOD: {triangles:?}",
         level.trees.len(),

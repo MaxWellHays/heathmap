@@ -229,20 +229,48 @@ pub fn decode_trees(bytes: &[u8]) -> Vec<Tree> {
 
 /// Frames between spawning heavy layers (terrain, trees, buildings, roads, props).
 const FRAMES_PER_STEP: u32 = 3;
+/// Spawn steps, in order: terrain, trees, buildings, roads, props.
+const SPAWN_STEPS: u32 = 5;
 
-/// Frames since the level became ready. The heavy layers spawn a few frames apart, so each
-/// one's meshes are uploaded to the GPU and freed before the next is built: spawning them
-/// all in one frame peaked near 4 GB, the most a browser (wasm32) can address.
-#[derive(Resource, Default)]
-pub struct SpawnFrame(u32);
-
-/// Run condition: true on the frame when spawn step `step` is due.
-pub fn spawn_step(step: u32) -> impl Fn(Option<Res<SpawnFrame>>) -> bool + Clone {
-    move |frame| frame.is_some_and(|f| f.0 == step * FRAMES_PER_STEP)
+/// The heavy layers spawn one after another, a few frames apart, each once its file has
+/// arrived: so each one's meshes are uploaded to the GPU and freed before the next is built
+/// (spawning them all in one frame peaked near 4 GB, the most a browser (wasm32) can
+/// address), and in the browser the scene appears layer by layer as files download.
+#[derive(Resource)]
+pub struct SpawnSequence {
+    next: u32,
+    wait: u32,
 }
 
-fn count_spawn_frames(mut frame: ResMut<SpawnFrame>) {
-    frame.0 = frame.0.saturating_add(1);
+impl Default for SpawnSequence {
+    fn default() -> Self {
+        Self { next: 1, wait: 0 }
+    }
+}
+
+impl SpawnSequence {
+    /// The current step has spawned; the next one may run a few frames from now.
+    pub fn done(&mut self) {
+        self.next += 1;
+        self.wait = FRAMES_PER_STEP;
+    }
+
+    /// All layers are in.
+    pub fn finished(&self) -> bool {
+        self.next > SPAWN_STEPS
+    }
+}
+
+/// Run condition: true while spawn step `step` is due (until its system calls `done`;
+/// a system whose file hasn't arrived yet just returns and runs again next frame).
+pub fn spawn_step(step: u32) -> impl Fn(Option<Res<SpawnSequence>>, Option<Res<State<LevelState>>>) -> bool + Clone {
+    move |seq, state| {
+        state.is_some_and(|s| *s.get() == LevelState::Ready) && seq.is_some_and(|q| q.next == step && q.wait == 0)
+    }
+}
+
+fn count_spawn_frames(mut seq: ResMut<SpawnSequence>) {
+    seq.wait = seq.wait.saturating_sub(1);
 }
 
 #[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -288,7 +316,7 @@ impl Plugin for LevelPlugin {
             .register_asset_loader(LevelMetaLoader)
             .register_asset_loader(BinaryFileLoader)
             .init_state::<LevelState>()
-            .init_resource::<SpawnFrame>()
+            .init_resource::<SpawnSequence>()
             .add_systems(Last, count_spawn_frames.run_if(in_state(LevelState::Ready)))
             .add_systems(Startup, move |mut commands: Commands, assets: Res<AssetServer>| {
                 commands.insert_resource(LevelHandles {
@@ -306,7 +334,8 @@ impl Plugin for LevelPlugin {
                 });
             })
             .add_systems(Update, request_data.run_if(in_state(LevelState::LoadingMeta)))
-            .add_systems(Update, finish_loading.run_if(in_state(LevelState::LoadingData)));
+            .add_systems(Update, finish_loading.run_if(in_state(LevelState::LoadingData)))
+            .add_systems(OnEnter(LevelState::Ready), request_rest);
     }
 }
 
@@ -317,17 +346,24 @@ fn request_data(
     mut next: ResMut<NextState<LevelState>>,
 ) {
     let Some(meta) = metas.get(&handles.meta) else { return };
+    // What the first picture needs; buildings, roads and props follow (`request_rest`), so
+    // on a slow connection the scene appears before everything has downloaded.
     let dir = handles.dir.clone();
     handles.terrain = Some(assets.load(format!("{dir}/{}", meta.terrain.file)));
-    handles.trees = Some(assets.load(format!("{dir}/{}", meta.trees.file)));
-    handles.buildings = Some(assets.load(format!("{dir}/{}", meta.buildings.file)));
-    handles.lines = Some(assets.load(format!("{dir}/{}", meta.lines.file)));
     handles.ground_sdf = Some(assets.load(format!("{dir}/{}", meta.ground_sdf.file)));
+    handles.trees = Some(assets.load(format!("{dir}/{}", meta.trees.file)));
     handles.water = Some(assets.load(format!("{dir}/{}", meta.water.file)));
-    handles.props = Some(assets.load(format!("{dir}/{}", meta.props.file)));
-    handles.barriers = Some(assets.load(format!("{dir}/{}", meta.barriers.file)));
     handles.landmarks = Some(assets.load(format!("{dir}/{}", meta.landmarks.file)));
     next.set(LevelState::LoadingData);
+}
+
+fn request_rest(mut handles: ResMut<LevelHandles>, metas: Res<Assets<LevelMeta>>, assets: Res<AssetServer>) {
+    let Some(meta) = metas.get(&handles.meta).cloned() else { return };
+    let dir = handles.dir.clone();
+    handles.buildings = Some(assets.load(format!("{dir}/{}", meta.buildings.file)));
+    handles.lines = Some(assets.load(format!("{dir}/{}", meta.lines.file)));
+    handles.props = Some(assets.load(format!("{dir}/{}", meta.props.file)));
+    handles.barriers = Some(assets.load(format!("{dir}/{}", meta.barriers.file)));
 }
 
 fn finish_loading(
@@ -344,9 +380,9 @@ fn finish_loading(
     ) else {
         return;
     };
-    // Buildings and lines are decoded by their own plugins; just wait for them to arrive.
+    // The others are decoded by their own plugins; just wait for them to arrive.
     let arrived = |h: &Option<Handle<BinaryFile>>| h.as_ref().is_some_and(|h| files.contains(h));
-    let files_needed = [&handles.buildings, &handles.lines, &handles.ground_sdf, &handles.water, &handles.props, &handles.barriers, &handles.landmarks];
+    let files_needed = [&handles.ground_sdf, &handles.water, &handles.landmarks];
     if !files_needed.into_iter().all(arrived) {
         return;
     }

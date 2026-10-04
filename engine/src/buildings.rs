@@ -11,7 +11,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use crate::level::{BinaryFile, Heightmap, Level, spawn_step};
+use crate::level::{BinaryFile, Heightmap, Level, spawn_step, SpawnSequence};
 use crate::lod::LodChunk;
 
 const CHUNK: f32 = 512.0;
@@ -98,6 +98,7 @@ fn spawn_buildings(
     mut index: ResMut<BuildingIndex>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut seq: ResMut<SpawnSequence>,
 ) {
     let Some(file) = handles.buildings.as_ref().and_then(|h| files.get(h)) else { return };
     let buildings = decode_buildings(&file.0);
@@ -132,6 +133,7 @@ fn spawn_buildings(
             .id();
         commands.entity(root).add_child(chunk);
     }
+    seq.done();
     info!("Spawned {} buildings ({pitched} pitched, {flat} flat roofs), {triangles} triangles", buildings.len());
     index.buildings = buildings;
 }

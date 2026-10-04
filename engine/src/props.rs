@@ -11,7 +11,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::buildings::Reader;
-use crate::level::{BinaryFile, Heightmap, LevelHandles, spawn_step};
+use crate::level::{BinaryFile, Heightmap, LevelHandles, spawn_step, SpawnSequence};
 use crate::lod::LodChunk;
 
 const CHUNK: f32 = 256.0;
@@ -334,7 +334,13 @@ fn spawn_props(
     hm: Res<Heightmap>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut seq: ResMut<SpawnSequence>,
 ) {
+    // Both files are requested after the first picture; wait until they're here.
+    let arrived = |h: &Option<Handle<BinaryFile>>| h.as_ref().is_some_and(|h| files.contains(h));
+    if !arrived(&handles.props) || !arrived(&handles.barriers) {
+        return;
+    }
     let material = materials.add(StandardMaterial {
         perceptual_roughness: 0.8,
         reflectance: 0.2,
@@ -379,6 +385,7 @@ fn spawn_props(
     };
     let prop_tris = spawn_chunks(prop_chunks, props_root, &PROP_DRAW_DISTANCE);
     let barrier_tris = spawn_chunks(barrier_chunks, barriers_root, &BARRIER_DRAW_DISTANCE);
+    seq.done();
     info!(
         "Spawned {} props ({prop_tris} triangles) and {} barriers ({barrier_tris} triangles)",
         props.len(),

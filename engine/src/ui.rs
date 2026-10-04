@@ -11,7 +11,7 @@ use crate::buildings::Buildings;
 use crate::ground::ElevationSettings;
 use crate::camera::{CameraMode, ModeRequest, cursor_captured, keyboard_free};
 use crate::import::{ImportRequest, ImportStatus};
-use crate::level::LevelState;
+use crate::level::{LevelState, SpawnSequence};
 use crate::lines::Lines;
 use crate::props::{Barriers, Props};
 use crate::runs::{Race, RunPlayback, Runs, run_color};
@@ -79,7 +79,7 @@ fn panel(
     mut contexts: EguiContexts,
     diagnostics: Res<DiagnosticsStore>,
     mode: Res<State<CameraMode>>,
-    level_state: Res<State<LevelState>>,
+    (level_state, spawning): (Res<State<LevelState>>, Res<SpawnSequence>),
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
     mut request: ResMut<ModeRequest>,
     mut layers: ResMut<LayerSettings>,
@@ -114,10 +114,11 @@ fn panel(
                     ui.label(egui::RichText::new(format!("{fps:.0} fps")).color(MUTED).small());
                 });
             });
-            if *level_state.get() != LevelState::Ready {
+            if *level_state.get() != LevelState::Ready || !spawning.finished() {
+                let what = if *level_state.get() == LevelState::Ready { "Loading buildings and roads…" } else { "Loading map data…" };
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(egui::RichText::new("Loading map data…").color(MUTED));
+                    ui.label(egui::RichText::new(what).color(MUTED));
                 });
             }
             ui.separator();

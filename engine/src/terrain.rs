@@ -8,7 +8,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::ground::{GroundMaterial, GroundMaterialHandle, HeightTexture, ground_material};
-use crate::level::{BinaryFile, Heightmap, Level, LevelHandles, spawn_step};
+use crate::level::{BinaryFile, Heightmap, Level, LevelHandles, spawn_step, SpawnSequence};
 use crate::lod::LodChunk;
 
 /// Samples per chunk side (×4 m = 512 m).
@@ -36,6 +36,7 @@ fn spawn_terrain(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<GroundMaterial>>,
     height: Res<HeightTexture>,
+    mut seq: ResMut<SpawnSequence>,
 ) {
     let hm = &level.heightmap;
     let Some(extension) = ground_material(&level, &handles, &files, &mut images, &height) else {
@@ -81,6 +82,7 @@ fn spawn_terrain(
             count += 1;
         }
     }
+    seq.done();
     info!("Spawned {count} terrain chunks × {} LODs", LOD_STEPS.len());
 }
 

@@ -16,7 +16,7 @@ use bevy::render::render_resource::TextureFormat;
 
 use crate::buildings::Reader;
 use crate::ground::{ElevationTargets, ElevationUniform, HeightTexture};
-use crate::level::{BinaryFile, Heightmap, LevelHandles, spawn_step};
+use crate::level::{BinaryFile, Heightmap, LevelHandles, spawn_step, SpawnSequence};
 use crate::landmarks::{Landmarks, deck_height};
 use crate::lod::LodChunk;
 use crate::textures::image_with_mips;
@@ -218,6 +218,7 @@ fn spawn_lines(
     height: Res<HeightTexture>,
     mut decks: ResMut<BridgeDecks>,
     landmarks: Res<Landmarks>,
+    mut seq: ResMut<SpawnSequence>,
 ) {
     let Some(file) = handles.lines.as_ref().and_then(|h| files.get(h)) else { return };
     let lines = decode_lines(&file.0);
@@ -381,6 +382,7 @@ fn spawn_lines(
             .id();
         commands.entity(root).add_child(chunk);
     }
+    seq.done();
     info!("Spawned {} roads and paths, triangles near / far: {triangles:?}", lines.len());
 }
 
