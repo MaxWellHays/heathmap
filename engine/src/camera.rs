@@ -174,6 +174,9 @@ impl Plugin for CameraPlugin {
 fn spawn_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
+        // Depth first, so each pixel is shaded once: overlapping tree crowns made the main
+        // pass ~6× more expensive at ground level without it.
+        bevy::core_pipeline::prepass::DepthPrepass,
         Projection::Perspective(PerspectiveProjection { far: 30_000.0, near: 0.2, ..default() }),
         ViewAngles { yaw: 0.0, pitch: 0.0, fly_speed: 25.0, follow_distance: FOLLOW_DISTANCE },
         Transform::from_xyz(0.0, 3000.0, 0.0).looking_at(Vec3::ZERO, Vec3::NEG_Z),
