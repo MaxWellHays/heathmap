@@ -25,7 +25,10 @@ const CHUNK: f32 = 512.0;
 const MAX_SEGMENT: f32 = 2.0; // m; ribbons are resampled this finely along their length…
 const ACROSS_SPACING: f32 = 1.5; // m; …and across their width, to follow the terrain
 const SKIRT_DEPTH: f32 = 0.3; // m below the terrain that strip edges reach
-const DRAW_DISTANCE: [f32; 1] = [3000.0];
+/// Full detail near, simplified strips (`Ribbons::coarse`) to 3 km, nothing beyond (the
+/// ground texture shows roads and paths too).
+const LOD_DISTANCES: [f32; 2] = [700.0, 3000.0];
+const COARSE_SEGMENT: f32 = 8.0; // m along simplified strips
 const CENTRE_LINE_WIDTH: f32 = 0.15;
 /// Centre lines stop this far from junctions, as painted lines do.
 const JUNCTION_CLEARANCE: f32 = 8.0;
@@ -271,8 +274,9 @@ fn spawn_lines(
         .flat_map(|l| [vertex_key(l.points[0]), vertex_key(*l.points.last().unwrap())])
         .collect();
 
-    // One mesh per (chunk, look).
+    // One mesh per (chunk, look), and simplified ones for distant views.
     let mut builders: std::collections::HashMap<((i32, i32), Look), Ribbons> = default();
+    let mut far_builders: std::collections::HashMap<((i32, i32), Look), Ribbons> = default();
     for line in &lines {
         let Some(&first) = line.points.first() else { continue };
         let key = ((first.x / CHUNK).floor() as i32, (first.y / CHUNK).floor() as i32);
@@ -308,6 +312,7 @@ fn spawn_lines(
         // instead, so they join steps and paths of other surfaces without notches.
         let caps = line_look == Look::Asphalt;
         builders.entry((key, line_look)).or_default().add(&line.points, line.width, lift, line.kind.repeat(), caps, profile, &heightmap);
+        far_builders.entry((key, line_look)).or_insert_with(Ribbons::coarse).add(&line.points, line.width, lift, line.kind.repeat(), false, profile, &heightmap);
         if !caps && !line.bridge && !on_terrace {
             let ribbons = builders.entry((key, line_look)).or_default();
             let n = line.points.len();
@@ -326,6 +331,7 @@ fn spawn_lines(
         }
         if let Some((h0, h1)) = deck {
             builders.entry((key, Look::Masonry)).or_default().bridge(&line.points, line.width, h0, h1, &heightmap);
+            far_builders.entry((key, Look::Masonry)).or_insert_with(Ribbons::coarse).bridge(&line.points, line.width, h0, h1, &heightmap);
             let total = line.points.windows(2).map(|w| w[0].distance(w[1])).sum();
             decks.0.push(Deck { points: line.points.clone(), half_width: line.width.max(2.0) / 2.0, h0, h1, total });
         }
@@ -342,33 +348,40 @@ fn spawn_lines(
         builders.entry((key, Look::Asphalt)).or_default().disc(*centre, width / 2.0, Kind::RoadMajor.lift(), &heightmap, Vec2::X, *width, Kind::RoadMajor.repeat(), 0.0);
     }
     let root = commands.spawn((Lines, Name::new("Roads and paths"), Transform::default(), Visibility::default())).id();
-    let mut triangles = 0;
-    let mut per_chunk: std::collections::HashMap<(i32, i32), Vec<Entity>> = default();
-    for ((key, l), ribbons) in builders {
-        triangles += ribbons.indices.len() / 3;
-        let mut e = commands.spawn((Mesh3d(meshes.add(ribbons.build())), MeshMaterial3d(material_for[&l].clone())));
-        if !l.casts_shadows() {
-            e.insert(NotShadowCaster);
+    let mut triangles = [0, 0];
+    // Per chunk: (near meshes, far meshes).
+    let mut per_chunk: std::collections::HashMap<(i32, i32), [Vec<Entity>; 2]> = default();
+    for (level, map) in [builders, far_builders].into_iter().enumerate() {
+        for ((key, l), ribbons) in map {
+            if ribbons.indices.is_empty() {
+                continue;
+            }
+            triangles[level] += ribbons.indices.len() / 3;
+            let mut e = commands.spawn((Mesh3d(meshes.add(ribbons.build())), MeshMaterial3d(material_for[&l].clone())));
+            if !l.casts_shadows() {
+                e.insert(NotShadowCaster);
+            }
+            let e = e.id();
+            per_chunk.entry(key).or_default()[level].push(e);
         }
-        let e = e.id();
-        per_chunk.entry(key).or_default().push(e);
     }
-    for ((cx, cz), entities) in per_chunk {
+    for ((cx, cz), [near, far]) in per_chunk {
         let c = Vec2::new((cx as f32 + 0.5) * CHUNK, (cz as f32 + 0.5) * CHUNK);
         let center = Vec3::new(c.x, heightmap.sample(c.x, c.y), c.y);
-        // A group entity holds this chunk's meshes so the LOD system can hide them together.
-        let group = commands.spawn((Transform::default(), Visibility::default())).add_children(&entities).id();
+        // A group entity per level holds this chunk's meshes so the LOD system can switch them together.
+        let near = commands.spawn((Transform::default(), Visibility::default())).add_children(&near).id();
+        let far = commands.spawn((Transform::default(), Visibility::Hidden)).add_children(&far).id();
         let chunk = commands
             .spawn((
-                LodChunk { center, levels: vec![group, Entity::PLACEHOLDER], distances: &DRAW_DISTANCE },
+                LodChunk { center, levels: vec![near, far, Entity::PLACEHOLDER], distances: &LOD_DISTANCES },
                 Transform::default(),
                 Visibility::default(),
             ))
-            .add_child(group)
+            .add_children(&[near, far])
             .id();
         commands.entity(root).add_child(chunk);
     }
-    info!("Spawned {} roads and paths, {triangles} triangles", lines.len());
+    info!("Spawned {} roads and paths, triangles near / far: {triangles:?}", lines.len());
 }
 
 /// The polyline with `start` metres cut off its beginning and `end` metres off its end
@@ -481,6 +494,9 @@ enum Profile {
 
 #[derive(Default)]
 struct Ribbons {
+    /// Simplified strips for distant views: resampled every `COARSE_SEGMENT`, one quad
+    /// across, no skirts.
+    coarse: bool,
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
@@ -490,12 +506,17 @@ struct Ribbons {
 }
 
 impl Ribbons {
+    fn coarse() -> Self {
+        Self { coarse: true, ..default() }
+    }
+
     /// A strip along `points`, following the terrain, a straight bridge deck, or a
     /// landmark terrace deck (see `Profile`).
     #[allow(clippy::too_many_arguments)]
     fn add(&mut self, points: &[Vec2], width: f32, lift: f32, repeat: f32, caps: bool, profile: Profile, hm: &Heightmap) {
         // Not for bridge decks (in the air) or centre lines.
-        let skirts = !matches!(profile, Profile::Straight(..)) && width > 0.5;
+        let skirts = !matches!(profile, Profile::Straight(..)) && width > 0.5 && !self.coarse;
+        let max_segment = if self.coarse { COARSE_SEGMENT } else { MAX_SEGMENT };
         if points.len() < 2 {
             return;
         }
@@ -511,7 +532,7 @@ impl Ribbons {
         // Resample so the ribbon follows the terrain between OSM vertices.
         let mut pts = Vec::with_capacity(points.len() * 2);
         for w in points.windows(2) {
-            let n = ((w[1] - w[0]).length() / MAX_SEGMENT).ceil().max(1.0) as usize;
+            let n = ((w[1] - w[0]).length() / max_segment).ceil().max(1.0) as usize;
             for k in 0..n {
                 pts.push(w[0].lerp(w[1], k as f32 / n as f32));
             }
@@ -521,7 +542,7 @@ impl Ribbons {
         if pts.len() < 2 {
             return;
         }
-        let cols = ((width / ACROSS_SPACING).ceil() as usize + 1).max(2);
+        let cols = if self.coarse { 2 } else { ((width / ACROSS_SPACING).ceil() as usize + 1).max(2) };
         let total: f32 = pts.windows(2).map(|w| w[0].distance(w[1])).sum();
         let height = |p: Vec2, along: f32| match profile {
             Profile::Straight(h0, h1) => (h0 + (h1 - h0) * (along / total.max(1e-3))).max(hm.sample(p.x, p.y) + lift),
