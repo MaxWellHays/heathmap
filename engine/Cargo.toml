@@ -3,6 +3,10 @@ name = "heathmap-engine"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Browser build for WebGPU instead of WebGL2 (more shadow cascades, GPU-driven culling).
+webgpu = ["bevy/webgpu"]
+
 [dependencies]
 bevy = { version = "0.19.1", features = ["png"] }
 bevy_egui = "0.42.0"
