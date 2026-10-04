@@ -93,6 +93,14 @@ fn main() {
     #[cfg(not(target_arch = "wasm32"))]
     app.add_plugins(bevy_brp_extras::BrpExtrasPlugin);
 
+    // HEATHMAP_PROFILE=1 logs CPU and GPU time per render pass every few seconds.
+    if std::env::var_os("HEATHMAP_PROFILE").is_some() {
+        app.add_plugins((
+            bevy::render::diagnostic::RenderDiagnosticsPlugin,
+            bevy::diagnostic::LogDiagnosticsPlugin { wait_duration: std::time::Duration::from_secs(3), ..default() },
+        ));
+    }
+
     app.run();
 }
 

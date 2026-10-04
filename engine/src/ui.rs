@@ -17,8 +17,10 @@ use crate::props::{Barriers, Props};
 use crate::runs::{Race, RunPlayback, Runs, run_color};
 use crate::trees::Trees;
 
-/// What is drawn and where the sun is. Changed from the panel or keys (B, T).
-#[derive(Resource)]
+/// What is drawn and where the sun is. Changed from the panel or keys (B, T), or over the
+/// Bevy Remote Protocol (resource `heathmap_engine::ui::LayerSettings`).
+#[derive(Resource, Reflect)]
+#[reflect(Resource)]
 pub struct LayerSettings {
     pub buildings: bool,
     pub trees: bool,
@@ -47,6 +49,7 @@ impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(EguiPlugin::default())
             .init_resource::<LayerSettings>()
+            .register_type::<LayerSettings>()
             .add_systems(EguiPrimaryContextPass, panel)
             .add_systems(Update, (layer_keys.run_if(keyboard_free), apply_layers).chain());
     }
