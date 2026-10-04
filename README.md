@@ -2,13 +2,18 @@
 
 A map of Hampstead Heath, London, in two versions:
 
+| Version | Live |
+|---|---|
+| **v1 — 3D engine** | https://maxwellhays.github.io/heathmap/3d/ |
+| **v0 — web map** | https://maxwellhays.github.io/heathmap/ |
+
 - **v1 — 3D engine** (`engine/`, current focus): a 3D renderer built with [Bevy](https://bevyengine.org) 0.19.
   LIDAR terrain, trees, buildings, paths, landmarks and street furniture; walk, run or fly around the
   Heath, see your own runs as routes and race ghost runners of them. Runs natively and in the browser
-  (WebAssembly).
+  (WebAssembly): [open the 3D version](https://maxwellhays.github.io/heathmap/3d/).
 - **v0 — web map** (`web/`): an interactive topographic map built with MapLibre GL — contours, footpaths
   by surface, woodland and meadows, named hills, landmarks. Supports a tilted view and 3D terrain.
-  Live site: https://maxwellhays.github.io/heathmap/
+  [Open the web map](https://maxwellhays.github.io/heathmap/).
 
 ## Layout
 
@@ -85,7 +90,8 @@ npm install
 npm run dev              # http://localhost:5173/heathmap/
 ```
 
-The live site is deployed from `main` by `.github/workflows/deploy.yml`.
+Both live versions are deployed from `main` by `.github/workflows/deploy.yml` (v0 at the site root,
+v1 under `/3d/`).
 
 ## Data sources
 
