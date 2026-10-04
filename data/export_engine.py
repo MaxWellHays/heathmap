@@ -78,6 +78,21 @@ PATH_HIGHWAYS = {"footway", "path", "track", "bridleway", "cycleway", "steps"}
 PAVED = {"asphalt", "paved", "concrete", "paving_stones", "sett", "concrete:plates", "chipseal"}
 
 
+def polygons(g) -> list:
+    """The polygons in any geometry: a Polygon, a MultiPolygon or a GeometryCollection (which
+    clipping or repairing a footprint can produce, mixed with stray lines and points)."""
+    if g.geom_type == "Polygon":
+        return [g]
+    return [p for part in getattr(g, "geoms", []) for p in polygons(part)]
+
+
+def lines_of(g) -> list:
+    """The line strings in any geometry (LineString, MultiLineString or GeometryCollection)."""
+    if g.geom_type in ("LineString", "LinearRing"):
+        return [g]
+    return [p for part in getattr(g, "geoms", []) for p in lines_of(part)]
+
+
 def to_local(x, y):
     """BNG metres -> engine (x, z)."""
     return x - ORIGIN[0], -(y - ORIGIN[1])
@@ -306,8 +321,7 @@ def export_buildings(meta: dict) -> None:
         p = f["properties"]
         if p.get("osm_id") in LANDMARK_IDS:
             continue  # built by its own generator (export_landmarks)
-        g = shape(f["geometry"])
-        for poly in (g.geoms if g.geom_type == "MultiPolygon" else [g]):
+        for poly in polygons(shape(f["geometry"])):
             if poly.area < 4:
                 continue
             rings = [poly.exterior, *poly.interiors]
@@ -338,7 +352,7 @@ def export_water(meta: dict) -> None:
     out = bytearray(struct.pack("<I", 0))
     count = 0
     for g in [merged]:
-        for poly in (g.geoms if g.geom_type == "MultiPolygon" else [g]):
+        for poly in polygons(g):
             if poly.area < 10:
                 continue
             rings = [poly.exterior, *poly.interiors]
@@ -373,7 +387,7 @@ def export_landmarks(meta: dict) -> None:
             print(f"    landmark {lm['name']} not found in buildings")
             continue
         g = shape(f["geometry"])
-        poly = max(g.geoms, key=lambda q: q.area) if g.geom_type == "MultiPolygon" else g
+        poly = max(polygons(g), key=lambda q: q.area)
         ring = list(poly.exterior.coords)[:-1]
         walks = []
         for line in paths:
@@ -552,12 +566,7 @@ def export_barriers(meta: dict) -> None:
             except ValueError:
                 height = 0.0
             g = shape(f["geometry"])
-            parts = []
-            if g.geom_type in ("Polygon", "MultiPolygon"):
-                for poly in (g.geoms if g.geom_type == "MultiPolygon" else [g]):
-                    parts.append(poly.exterior)
-            else:
-                parts = list(g.geoms) if g.geom_type == "MultiLineString" else [g]
+            parts = [poly.exterior for poly in polygons(g)] + lines_of(g)
             for part in parts:
                 pts = list(part.coords)
                 if len(pts) < 2:
@@ -623,7 +632,7 @@ def export_lines(meta: dict) -> None:
                 ROAD_WIDTHS.get(hw, {"track": 3.0, "steps": 2.0, "path_paved": 2.0}.get(kind, 1.5))
         flags = (1 if tag(tags, "oneway") == "yes" else 0) | (2 if tag(tags, "bridge") else 0)
         g = shape(f["geometry"])
-        for line in (g.geoms if g.geom_type == "MultiLineString" else [g]):
+        for line in lines_of(g):
             pts = list(line.coords)
             if len(pts) < 2:
                 continue
