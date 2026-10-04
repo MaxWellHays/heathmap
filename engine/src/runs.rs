@@ -1,10 +1,11 @@
-//! Your runs (exported from Strava by data/export_engine.py): each route drawn as a thin
+//! Your runs (imported in the app, see import.rs): each route drawn as a thin
 //! coloured line on the ground, and a ghost runner per run replaying it at the pace you
 //! actually ran (all starting together; playback speed adjustable from the panel).
 //!
 //! Racing: in walk / third person your recent path is compared with all your runs; every
-//! run that followed the same way (same order, so same direction) gets a race ghost, timed
-//! as if you'd both started where your recent path began, running at its recorded pace.
+//! run that followed the same way (same order, so same direction) gets a race ghost. It
+//! starts beside you, from the point of its route nearest to you when it's recognised, and
+//! runs on at its recorded pace.
 //! Several can race at once; each goes when you leave its route. The panel shows how far
 //! ahead or behind each one is. G (or the panel) turns this on and off.
 //!
@@ -13,8 +14,7 @@
 use bevy::prelude::*;
 
 use crate::avatar::{FigureColors, Gait, RunnerAssets, spawn_figure};
-use crate::buildings::Reader;
-use crate::level::{BinaryFile, Heightmap, LevelHandles, LevelState};
+use crate::level::{Heightmap, LevelState};
 use crate::camera::{CameraMode, Player, RunnerSpeed, keyboard_free};
 use crate::props::Shapes;
 
@@ -24,7 +24,7 @@ const ROUTE_LIFT: f32 = 0.16; // just above the highest road surface
 pub struct Run {
     #[allow(dead_code)] // kept for linking back to Strava
     pub id: u64,
-    /// Start time (Unix seconds, local time).
+    /// Start time (Unix seconds, UTC).
     pub start: i64,
     /// (position, seconds since start)
     pub points: Vec<(Vec2, f32)>,
@@ -33,6 +33,18 @@ pub struct Run {
 }
 
 impl Run {
+    pub fn new(id: u64, start: i64, points: Vec<(Vec2, f32)>) -> Self {
+        let mut along = Vec::with_capacity(points.len());
+        let mut d = 0.0;
+        for (k, p) in points.iter().enumerate() {
+            if k > 0 {
+                d += p.0.distance(points[k - 1].0);
+            }
+            along.push(d);
+        }
+        Self { id, start, points, along }
+    }
+
     pub fn duration(&self) -> f32 {
         self.points.last().map_or(0.0, |p| p.1)
     }
@@ -102,35 +114,13 @@ impl Plugin for RunsPlugin {
         app.init_resource::<Runs>()
             .init_resource::<RunPlayback>()
             .init_resource::<Race>()
-            .add_systems(OnEnter(LevelState::Ready), spawn_runs)
             .add_systems(
                 Update,
-                (move_ghosts, race_keys.run_if(keyboard_free), track_routes, update_race, apply_visibility)
+                (rebuild_runs, move_ghosts, race_keys.run_if(keyboard_free), track_routes, update_race, apply_visibility)
                     .chain()
                     .run_if(in_state(LevelState::Ready)),
             );
     }
-}
-
-fn decode(bytes: &[u8]) -> Vec<Run> {
-    let mut r = Reader { bytes, pos: 0 };
-    let count = r.u32();
-    (0..count)
-        .map(|_| {
-            let id = u64::from(r.u32()) | (u64::from(r.u32()) << 32);
-            let start = (u64::from(r.u32()) | (u64::from(r.u32()) << 32)) as i64;
-            let points: Vec<(Vec2, f32)> = (0..r.u32()).map(|_| (Vec2::new(r.f32(), r.f32()), r.f32())).collect();
-            let mut along = Vec::with_capacity(points.len());
-            let mut d = 0.0;
-            for (k, p) in points.iter().enumerate() {
-                if k > 0 {
-                    d += p.0.distance(points[k - 1].0);
-                }
-                along.push(d);
-            }
-            Run { id, start, points, along }
-        })
-        .collect()
 }
 
 /// A distinct, saturated colour per run.
@@ -138,20 +128,31 @@ pub fn run_color(i: usize) -> Color {
     Color::hsl((i as f32 * 137.5) % 360.0, 0.85, 0.5)
 }
 
-fn spawn_runs(
+/// (Re)builds the routes and ghost runners whenever your runs change (loaded or imported).
+#[allow(clippy::too_many_arguments)]
+fn rebuild_runs(
     mut commands: Commands,
-    handles: Res<LevelHandles>,
-    files: Res<Assets<BinaryFile>>,
     hm: Res<Heightmap>,
-    mut runs: ResMut<Runs>,
+    runs: Res<Runs>,
+    mut race: ResMut<Race>,
+    mut playback: ResMut<RunPlayback>,
     mut runner_speed: ResMut<RunnerSpeed>,
     runner: Res<RunnerAssets>,
+    old: Query<Entity, Or<(With<Routes>, With<Ghosts>)>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let Some(file) = handles.runs.as_ref().and_then(|h| files.get(h)) else { return };
-    runs.0 = decode(&file.0).into_iter().filter(|r| r.points.len() >= 2).collect();
+    if !runs.is_changed() {
+        return;
+    }
+    for e in &old {
+        commands.entity(e).despawn();
+    }
+    race.clear(&mut commands);
+    playback.time = 0.0;
+    playback.set_changed(); // re-apply route / ghost visibility to the new entities
     if runs.0.is_empty() {
+        runner_speed.0 = RunnerSpeed::default().0;
         return;
     }
     if let Some(pace) = average_moving_speed(&runs.0) {
@@ -274,7 +275,7 @@ struct Trail {
 
 pub struct RaceGhost {
     pub run: usize,
-    /// Run time at the point where the race started (where your trail began).
+    /// Run time at the point where the race started (beside you, when recognised).
     t0: f32,
     /// Your clock time when you passed that point.
     start_clock: f32,
@@ -407,12 +408,12 @@ fn track_routes(
         if race.ghosts.iter().any(|g| g.run == ri) {
             continue;
         }
-        if let Some((fit, start, cursor)) = match_trail(run, &race.trail.points) {
-            let start_clock = race.trail.points[0].1;
+        if let Some((fit, cursor)) = match_trail(run, &race.trail.points) {
+            // Start beside you: at the run's point nearest to where you are now.
             found.push((fit, RaceGhost {
                 run: ri,
-                t0: run.points[start].1,
-                start_clock,
+                t0: run.points[cursor].1,
+                start_clock: clock,
                 cursor,
                 gap_s: 0.0,
                 gap_m: 0.0,
@@ -438,8 +439,8 @@ fn track_routes(
 }
 
 /// Whether `run` follows the `trail` (in the same order, so in the same direction).
-/// Returns (mean distance, run index where the trail starts, run index where it ends).
-fn match_trail(run: &Run, trail: &[(Vec2, f32)]) -> Option<(f32, usize, usize)> {
+/// Returns (mean distance, run index where the trail ends, i.e. nearest to you now).
+fn match_trail(run: &Run, trail: &[(Vec2, f32)]) -> Option<(f32, usize)> {
     let first = trail[0].0;
     let pts = &run.points;
     // Candidate starts: points closest to the trail's start on each pass of the run near it.
@@ -459,7 +460,7 @@ fn match_trail(run: &Run, trail: &[(Vec2, f32)]) -> Option<(f32, usize, usize)> 
         i += 1;
     }
     let max_misses = ((1.0 - MATCH_FRACTION) * trail.len() as f32).floor() as usize;
-    let mut best: Option<(f32, usize, usize)> = None;
+    let mut best: Option<(f32, usize)> = None;
     for start in starts {
         // Walk the run forward alongside the trail, always to the nearest point ahead.
         let (mut j, mut misses, mut total) = (start, 0, 0.0);
@@ -480,7 +481,7 @@ fn match_trail(run: &Run, trail: &[(Vec2, f32)]) -> Option<(f32, usize, usize)> 
         // The run must actually cover the trail, not just touch its start and end.
         let covered = run.along[j] - run.along[start];
         if misses <= max_misses && covered > 0.7 * trail_length(trail) && best.is_none_or(|b| mean < b.0) {
-            best = Some((mean, start, j));
+            best = Some((mean, j));
         }
     }
     best

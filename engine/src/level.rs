@@ -50,10 +50,39 @@ pub struct LevelMeta {
     pub props: FileMeta,
     pub barriers: FileMeta,
     pub landmarks: FileMeta,
-    pub runs: FileMeta,
+    /// How GPS positions map into the level (for imported runs); missing in older exports.
+    #[serde(default)]
+    pub georef: Option<Georef>,
 }
 
-/// Raw bytes of a `.bin` file; decoded once all level files have arrived.
+/// WGS84 → level coordinates: a cubic polynomial in (lon − lon0, lat − lat0) × scale,
+/// fitted to the exact projection by `data/export_engine.py`.
+#[derive(Deserialize, Debug, Clone)]
+pub struct Georef {
+    pub lon0: f64,
+    pub lat0: f64,
+    pub scale: f64,
+    /// Powers (i, j) of u and v for each coefficient.
+    pub terms: Vec<[i32; 2]>,
+    pub x: Vec<f64>,
+    pub z: Vec<f64>,
+}
+
+impl Georef {
+    pub fn to_level(&self, lat: f64, lon: f64) -> Vec2 {
+        let (u, v) = ((lon - self.lon0) * self.scale, (lat - self.lat0) * self.scale);
+        let (mut x, mut z) = (0.0, 0.0);
+        for (k, [i, j]) in self.terms.iter().enumerate() {
+            let m = u.powi(*i) * v.powi(*j);
+            x += self.x[k] * m;
+            z += self.z[k] * m;
+        }
+        Vec2::new(x as f32, z as f32)
+    }
+}
+
+/// Raw bytes of a `.bin` file; decoded once all level files have arrived. The files may be
+/// gzipped (the export compresses them, so they download quickly from a static web host).
 #[derive(Asset, TypePath, Debug)]
 pub struct BinaryFile(pub Vec<u8>);
 
@@ -87,6 +116,11 @@ impl AssetLoader for BinaryFileLoader {
     async fn load(&self, reader: &mut dyn Reader, _: &(), _: &mut LoadContext<'_>) -> Result<BinaryFile, BevyError> {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
+        if bytes.starts_with(&[0x1f, 0x8b]) {
+            let mut out = Vec::new();
+            std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&bytes[..]), &mut out)?;
+            bytes = out;
+        }
         Ok(BinaryFile(bytes))
     }
 
@@ -193,6 +227,24 @@ pub fn decode_trees(bytes: &[u8]) -> Vec<Tree> {
         .collect()
 }
 
+/// Frames between spawning heavy layers (terrain, trees, buildings, roads, props).
+const FRAMES_PER_STEP: u32 = 3;
+
+/// Frames since the level became ready. The heavy layers spawn a few frames apart, so each
+/// one's meshes are uploaded to the GPU and freed before the next is built: spawning them
+/// all in one frame peaked near 4 GB, the most a browser (wasm32) can address.
+#[derive(Resource, Default)]
+pub struct SpawnFrame(u32);
+
+/// Run condition: true on the frame when spawn step `step` is due.
+pub fn spawn_step(step: u32) -> impl Fn(Option<Res<SpawnFrame>>) -> bool + Clone {
+    move |frame| frame.is_some_and(|f| f.0 == step * FRAMES_PER_STEP)
+}
+
+fn count_spawn_frames(mut frame: ResMut<SpawnFrame>) {
+    frame.0 = frame.0.saturating_add(1);
+}
+
 #[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LevelState {
     #[default]
@@ -214,7 +266,6 @@ pub struct LevelHandles {
     pub props: Option<Handle<BinaryFile>>,
     pub barriers: Option<Handle<BinaryFile>>,
     pub landmarks: Option<Handle<BinaryFile>>,
-    pub runs: Option<Handle<BinaryFile>>,
 }
 
 /// The loaded level, available once `LevelState::Ready` is reached.
@@ -237,6 +288,8 @@ impl Plugin for LevelPlugin {
             .register_asset_loader(LevelMetaLoader)
             .register_asset_loader(BinaryFileLoader)
             .init_state::<LevelState>()
+            .init_resource::<SpawnFrame>()
+            .add_systems(Last, count_spawn_frames.run_if(in_state(LevelState::Ready)))
             .add_systems(Startup, move |mut commands: Commands, assets: Res<AssetServer>| {
                 commands.insert_resource(LevelHandles {
                     meta: assets.load(format!("{dir}/level.json")),
@@ -250,7 +303,6 @@ impl Plugin for LevelPlugin {
                     props: None,
                     barriers: None,
                     landmarks: None,
-                    runs: None,
                 });
             })
             .add_systems(Update, request_data.run_if(in_state(LevelState::LoadingMeta)))
@@ -275,7 +327,6 @@ fn request_data(
     handles.props = Some(assets.load(format!("{dir}/{}", meta.props.file)));
     handles.barriers = Some(assets.load(format!("{dir}/{}", meta.barriers.file)));
     handles.landmarks = Some(assets.load(format!("{dir}/{}", meta.landmarks.file)));
-    handles.runs = Some(assets.load(format!("{dir}/{}", meta.runs.file)));
     next.set(LevelState::LoadingData);
 }
 
@@ -295,7 +346,7 @@ fn finish_loading(
     };
     // Buildings and lines are decoded by their own plugins; just wait for them to arrive.
     let arrived = |h: &Option<Handle<BinaryFile>>| h.as_ref().is_some_and(|h| files.contains(h));
-    let files_needed = [&handles.buildings, &handles.lines, &handles.ground_sdf, &handles.water, &handles.props, &handles.barriers, &handles.landmarks, &handles.runs];
+    let files_needed = [&handles.buildings, &handles.lines, &handles.ground_sdf, &handles.water, &handles.props, &handles.barriers, &handles.landmarks];
     if !files_needed.into_iter().all(arrived) {
         return;
     }

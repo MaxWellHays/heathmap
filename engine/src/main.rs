@@ -8,6 +8,7 @@ mod avatar;
 mod buildings;
 mod camera;
 mod ground;
+mod import;
 mod landmarks;
 mod level;
 mod lines;
@@ -29,6 +30,7 @@ use bevy::prelude::*;
 use avatar::AvatarPlugin;
 use buildings::BuildingsPlugin;
 use ground::GroundPlugin;
+use import::ImportPlugin;
 use camera::CameraPlugin;
 use landmarks::LandmarksPlugin;
 use level::{Heightmap, LevelPlugin};
@@ -44,6 +46,10 @@ use water::WaterPlugin;
 use bookmarks::BookmarksPlugin;
 
 fn main() {
+    // In the browser, show panic messages in the console (otherwise only "unreachable" appears).
+    #[cfg(target_arch = "wasm32")]
+    std::panic::set_hook(Box::new(|info| web_sys::console::error_1(&info.to_string().into())));
+
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
@@ -74,6 +80,7 @@ fn main() {
         LandmarksPlugin,
         AvatarPlugin,
         RunsPlugin,
+        ImportPlugin,
         BookmarksPlugin,
     ))
     .insert_resource(ClearColor(Color::srgb(0.78, 0.85, 0.92)))
@@ -81,6 +88,7 @@ fn main() {
     .insert_resource(DirectionalLightShadowMap { size: 4096 })
     .add_systems(Startup, spawn_sun)
     .add_systems(Update, fit_shadows_to_view);
+
 
     #[cfg(not(target_arch = "wasm32"))]
     app.add_plugins(bevy_brp_extras::BrpExtrasPlugin);

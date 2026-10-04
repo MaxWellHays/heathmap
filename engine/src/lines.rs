@@ -15,9 +15,9 @@ use bevy::shader::ShaderRef;
 use bevy::render::render_resource::TextureFormat;
 
 use crate::buildings::Reader;
-use crate::ground::{ElevationTargets, ElevationUniform, HeightTexture, create_height_texture};
-use crate::level::{BinaryFile, Heightmap, LevelHandles, LevelState};
-use crate::landmarks::{Landmarks, deck_height, load_landmarks};
+use crate::ground::{ElevationTargets, ElevationUniform, HeightTexture};
+use crate::level::{BinaryFile, Heightmap, LevelHandles, spawn_step};
+use crate::landmarks::{Landmarks, deck_height};
 use crate::lod::LodChunk;
 use crate::textures::image_with_mips;
 
@@ -166,7 +166,7 @@ impl Plugin for LinesPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<LinesMaterial>::default())
             .init_resource::<BridgeDecks>()
-            .add_systems(OnEnter(LevelState::Ready), spawn_lines.after(create_height_texture).after(load_landmarks));
+            .add_systems(Update, spawn_lines.run_if(spawn_step(4)));
     }
 }
 

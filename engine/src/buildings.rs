@@ -11,7 +11,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use crate::level::{BinaryFile, Heightmap, Level, LevelState};
+use crate::level::{BinaryFile, Heightmap, Level, spawn_step};
 use crate::lod::LodChunk;
 
 const CHUNK: f32 = 512.0;
@@ -47,7 +47,7 @@ pub struct BuildingsPlugin;
 impl Plugin for BuildingsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BuildingIndex>()
-            .add_systems(OnEnter(LevelState::Ready), spawn_buildings);
+            .add_systems(Update, spawn_buildings.run_if(spawn_step(3)));
     }
 }
 

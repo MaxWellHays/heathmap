@@ -2,7 +2,9 @@
 //! 1 Map (orbit): left drag grabs the 3D point under the cursor (terrain, tree or
 //!   building) and keeps it under the cursor; right drag or Ctrl/Shift + left drag
 //!   orbits around that point (sideways rotates, up/down tilts); scroll zooms
-//!   smoothly towards the point under the cursor.
+//!   smoothly towards the point under the cursor. WASD / arrows glide over the map
+//!   (relative to the screen, faster the higher you are, Shift ×4.5); Q/E turn and R/F
+//!   tilt around the point in the middle of the view.
 //! 2 Walk: first person at eye height; WASD, Shift ×4.5, Space jumps, mouse looks.
 //! 3 Third person: camera follows the player avatar; WASD moves relative to the
 //!   view, Space jumps, mouse orbits the camera around the player.
@@ -39,6 +41,8 @@ const FOLLOW_RANGE: (f32, f32) = (1.5, 120.0);
 const MIN_CAMERA_CLEARANCE: f32 = 2.0; // map view: metres above the terrain
 const ZOOM_STEP: f32 = 0.82; // distance factor per scroll notch
 const ZOOM_SMOOTHING: f32 = 14.0; // 1/s; higher settles faster
+const MAP_KEY_SPEED: f32 = 1.2; // map view: keyboard glide speed per metre of height above ground (1/s)
+const MAP_TURN_SPEED: f32 = 1.2; // map view: Q/E and R/F, radians per second
 const START: Vec2 = Vec2::new(665.0, 366.0); // Parliament Hill summit in level coordinates
 
 #[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -279,6 +283,40 @@ fn map_controls(
         _ => {}
     }
 
+    // Keyboard: glide over the map relative to the screen, at a speed that scales with height.
+    let typing = egui.wants_keyboard_input();
+    let dt = time.delta_secs();
+    let glide = if typing { Vec3::ZERO } else { move_input(&keys) };
+    if glide != Vec3::ZERO {
+        let flat = |v: Vec3| v.with_y(0.0).normalize_or_zero();
+        // Forward + up is the top of the screen on the ground at any tilt, even straight down.
+        let (forward, right) = (flat(*transform.forward() + *transform.up()), flat(*transform.right()));
+        let p = transform.translation;
+        let altitude = (p.y - hm.sample(p.x, p.z)).max(MIN_CAMERA_CLEARANCE);
+        let speed = (altitude * MAP_KEY_SPEED).clamp(15.0, 4000.0) * boost(&keys);
+        let step = (right * glide.x - forward * glide.z) * speed * dt;
+        transform.translation += step;
+        if let Some((target, _)) = input.zoom.as_mut() {
+            *target += step;
+        }
+    }
+    // Q/E turn, R/F tilt, around the ground point in the middle of the view.
+    let key = |k: KeyCode| if !typing && keys.pressed(k) { 1.0 } else { 0.0 };
+    let (turn, tilt) = (key(KeyCode::KeyQ) - key(KeyCode::KeyE), key(KeyCode::KeyF) - key(KeyCode::KeyR));
+    if (turn != 0.0 || tilt != 0.0)
+        && let Some(pivot) = camera
+            .logical_viewport_size()
+            .and_then(|size| camera.viewport_to_world(cam_gtf, size / 2.0).ok())
+            .and_then(|ray| terrain_hit(ray, hm, 30_000.0).map(|t| ray.get_point(t)))
+    {
+        let yaw = Quat::from_rotation_y(turn * MAP_TURN_SPEED * dt);
+        let current = tilt_of(&transform);
+        let new_tilt = (current + tilt * MAP_TURN_SPEED * dt).clamp(MIN_TILT, MAX_TILT);
+        let rotation = yaw * Quat::from_axis_angle(*transform.right(), -(new_tilt - current));
+        transform.translation = pivot + rotation * (transform.translation - pivot);
+        transform.rotation = rotation * transform.rotation;
+    }
+
     // Scrolling queues zoom towards the point under the cursor; it is applied smoothly below.
     let lines = match scroll.unit {
         MouseScrollUnit::Line => scroll.delta.y,
@@ -439,10 +477,10 @@ fn look(
 
 fn move_input(keys: &ButtonInput<KeyCode>) -> Vec3 {
     let mut v = Vec3::ZERO;
-    if keys.pressed(KeyCode::KeyW) { v.z -= 1.0; }
-    if keys.pressed(KeyCode::KeyS) { v.z += 1.0; }
-    if keys.pressed(KeyCode::KeyA) { v.x -= 1.0; }
-    if keys.pressed(KeyCode::KeyD) { v.x += 1.0; }
+    if keys.any_pressed([KeyCode::KeyW, KeyCode::ArrowUp]) { v.z -= 1.0; }
+    if keys.any_pressed([KeyCode::KeyS, KeyCode::ArrowDown]) { v.z += 1.0; }
+    if keys.any_pressed([KeyCode::KeyA, KeyCode::ArrowLeft]) { v.x -= 1.0; }
+    if keys.any_pressed([KeyCode::KeyD, KeyCode::ArrowRight]) { v.x += 1.0; }
     v.normalize_or_zero()
 }
 

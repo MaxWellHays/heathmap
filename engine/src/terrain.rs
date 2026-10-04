@@ -7,8 +7,8 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use crate::ground::{GroundMaterial, GroundMaterialHandle, HeightTexture, create_height_texture, ground_material};
-use crate::level::{BinaryFile, Heightmap, Level, LevelHandles, LevelState};
+use crate::ground::{GroundMaterial, GroundMaterialHandle, HeightTexture, ground_material};
+use crate::level::{BinaryFile, Heightmap, Level, LevelHandles, spawn_step};
 use crate::lod::LodChunk;
 
 /// Samples per chunk side (×4 m = 512 m).
@@ -23,7 +23,7 @@ pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(LevelState::Ready), spawn_terrain.after(create_height_texture));
+        app.add_systems(Update, spawn_terrain.run_if(spawn_step(1)));
     }
 }
 

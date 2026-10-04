@@ -5,12 +5,21 @@
 //! Each figure's clip follows its `Gait` (speed and whether it's in the air), crossfading
 //! between clips, with playback rate matched to the speed so the feet don't slide. The
 //! mannequin is restained per figure: light wood for you, each run's colour for ghosts.
+//! Ghosts also get an x-ray copy that shows their silhouette through trees, buildings and
+//! hills (assets/shaders/xray.wgsl), so you can keep track of them.
 
 use std::time::Duration;
 
 use bevy::animation::{graph::AnimationNodeIndex, transition::AnimationTransitions};
+use bevy::camera::visibility::NoFrustumCulling;
 use bevy::gltf::Gltf;
+use bevy::light::{NotShadowCaster, NotShadowReceiver};
+use bevy::mesh::MeshVertexBufferLayoutRef;
+use bevy::mesh::skinning::SkinnedMesh;
+use bevy::pbr::{MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
+use bevy::render::render_resource::{AsBindGroup, CompareFunction, RenderPipelineDescriptor, SpecializedMeshPipelineError};
+use bevy::shader::ShaderRef;
 
 const MODEL: &str = "models/runner/mannequin.glb";
 const CROSSFADE: Duration = Duration::from_millis(250);
@@ -22,16 +31,18 @@ pub struct Gait {
     pub airborne: bool,
 }
 
-/// Colours for the mannequin: body and joints.
+/// Colours for the mannequin: body and joints, and the silhouette shown when it's hidden
+/// behind something (none for you).
 #[derive(Clone, Copy)]
 pub struct FigureColors {
     pub main: Color,
     pub joints: Color,
+    pub xray: Option<Color>,
 }
 
 impl Default for FigureColors {
     fn default() -> Self {
-        Self { main: Color::srgb(0.86, 0.71, 0.53), joints: Color::srgb(0.62, 0.45, 0.30) }
+        Self { main: Color::srgb(0.86, 0.71, 0.53), joints: Color::srgb(0.62, 0.45, 0.30), xray: None }
     }
 }
 
@@ -43,7 +54,7 @@ impl FigureColors {
             let (a, b) = (a.to_srgba(), tint.to_srgba());
             Color::srgb(a.red + (b.red - a.red) * t, a.green + (b.green - a.green) * t, a.blue + (b.blue - a.blue) * t)
         };
-        Self { main: mix(base.main, 0.65), joints: mix(base.joints, 0.4) }
+        Self { main: mix(base.main, 0.65), joints: mix(base.joints, 0.4), xray: Some(tint) }
     }
 }
 
@@ -80,7 +91,8 @@ pub struct AvatarPlugin;
 
 impl Plugin for AvatarPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(PreStartup, load_assets)
+        app.add_plugins(MaterialPlugin::<XRayMaterial>::default())
+            .add_systems(PreStartup, load_assets)
             .add_systems(Update, (build_graph, attach_animators, drive_animators, restain).chain());
     }
 }
@@ -176,18 +188,93 @@ fn drive_animators(
     }
 }
 
+/// A figure's silhouette where it is hidden: drawn only where something nearer covers it
+/// (inverted depth test), translucent, without writing depth or casting shadows.
+#[derive(Asset, AsBindGroup, TypePath, Clone)]
+pub struct XRayMaterial {
+    #[uniform(0)]
+    color: LinearRgba,
+}
+
+impl Material for XRayMaterial {
+    fn vertex_shader() -> ShaderRef {
+        "shaders/xray.wgsl".into()
+    }
+
+    fn fragment_shader() -> ShaderRef {
+        "shaders/xray.wgsl".into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+
+    fn enable_prepass() -> bool {
+        false
+    }
+
+    fn enable_shadows() -> bool {
+        false
+    }
+
+    fn specialize(
+        _: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _: &MeshVertexBufferLayoutRef,
+        _: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        if let Some(depth) = descriptor.depth_stencil.as_mut() {
+            // Reversed Z: a smaller depth is further away, so this passes only behind things.
+            depth.depth_compare = Some(CompareFunction::Less);
+            depth.depth_write_enabled = Some(false);
+        }
+        Ok(())
+    }
+}
+
+/// On a figure mesh that already has its x-ray copy.
+#[derive(Component)]
+struct HasXRay;
+
 /// Replaces the model's materials with the figure's colours (body vs joints told apart by
-/// the original colours: an orange body and purple joints).
+/// the original colours: an orange body and purple joints), and gives ghosts their x-ray copy.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn restain(
     mut commands: Commands,
-    meshes: Query<(Entity, &MeshMaterial3d<StandardMaterial>), Added<MeshMaterial3d<StandardMaterial>>>,
+    meshes: Query<
+        (Entity, &MeshMaterial3d<StandardMaterial>, &Mesh3d, &Transform, Option<&SkinnedMesh>, Option<&ChildOf>, Has<HasXRay>),
+        Added<MeshMaterial3d<StandardMaterial>>,
+    >,
     parents: Query<&ChildOf>,
     figures: Query<&Figure>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut xray_materials: ResMut<Assets<XRayMaterial>>,
     mut cache: Local<std::collections::HashMap<(u32, bool), Handle<StandardMaterial>>>,
+    mut xray_cache: Local<std::collections::HashMap<u32, Handle<XRayMaterial>>>,
 ) {
-    for (entity, material) in &meshes {
+    for (entity, material, mesh, transform, skin, parent, has_xray) in &meshes {
         let Some(figure) = parents.iter_ancestors(entity).find_map(|e| figures.get(e).ok()) else { continue };
+        if let (Some(tint), Some(parent), false) = (figure.0.xray, parent, has_xray) {
+            let key = tint.to_srgba().to_u8_array().iter().fold(0u32, |k, b| k * 256 + *b as u32);
+            let handle = xray_cache
+                .entry(key)
+                .or_insert_with(|| xray_materials.add(XRayMaterial { color: LinearRgba::from(tint).with_alpha(0.85) }))
+                .clone();
+            let mut copy = commands.spawn((
+                Mesh3d(mesh.0.clone()),
+                MeshMaterial3d(handle),
+                *transform,
+                NotShadowCaster,
+                NotShadowReceiver,
+                // Skinned: the animated pose can leave the bind pose's bounds.
+                NoFrustumCulling,
+                ChildOf(parent.parent()),
+            ));
+            if let Some(skin) = skin {
+                copy.insert(skin.clone());
+            }
+            commands.entity(entity).insert(HasXRay);
+        }
         let Some(original) = materials.get(&material.0) else { continue };
         let base = original.base_color.to_srgba();
         let is_joint = base.blue > base.red;

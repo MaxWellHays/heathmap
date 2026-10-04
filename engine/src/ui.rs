@@ -10,6 +10,8 @@ use crate::bookmarks::Bookmarks;
 use crate::buildings::Buildings;
 use crate::ground::ElevationSettings;
 use crate::camera::{CameraMode, ModeRequest, cursor_captured, keyboard_free};
+use crate::import::{ImportRequest, ImportStatus};
+use crate::level::LevelState;
 use crate::lines::Lines;
 use crate::props::{Barriers, Props};
 use crate::runs::{Race, RunPlayback, Runs, run_color};
@@ -74,6 +76,7 @@ fn panel(
     mut contexts: EguiContexts,
     diagnostics: Res<DiagnosticsStore>,
     mode: Res<State<CameraMode>>,
+    level_state: Res<State<LevelState>>,
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
     mut request: ResMut<ModeRequest>,
     mut layers: ResMut<LayerSettings>,
@@ -83,6 +86,8 @@ fn panel(
     runs: Res<Runs>,
     mut playback: ResMut<RunPlayback>,
     mut race: ResMut<Race>,
+    (mut import, import_status): (ResMut<ImportRequest>, Res<ImportStatus>),
+    mut confirm_forget: Local<bool>,
     mut styled: Local<bool>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -106,6 +111,12 @@ fn panel(
                     ui.label(egui::RichText::new(format!("{fps:.0} fps")).color(MUTED).small());
                 });
             });
+            if *level_state.get() != LevelState::Ready {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(egui::RichText::new("Loading map data…").color(MUTED));
+                });
+            }
             ui.separator();
 
             ui.label(egui::RichText::new("VIEW").color(MUTED).small());
@@ -156,8 +167,47 @@ fn panel(
             ui.add(egui::Slider::new(&mut layers.sun_elevation, 3.0..=85.0).text("height").suffix("°"));
             ui.separator();
 
-            if !runs.0.is_empty() {
-                ui.label(egui::RichText::new(format!("MY RUNS ({})", runs.0.len())).color(MUTED).small());
+            let title = if runs.0.is_empty() { "MY RUNS".to_string() } else { format!("MY RUNS ({})", runs.0.len()) };
+            ui.label(egui::RichText::new(title).color(MUTED).small());
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!import_status.busy, egui::Button::new("Import runs…").small()).clicked() {
+                    import.pick_files = true;
+                }
+                if !runs.0.is_empty() {
+                    if !*confirm_forget {
+                        *confirm_forget = ui.small_button("Forget my runs").clicked();
+                    } else {
+                        ui.label(egui::RichText::new("Delete from this device?").small());
+                        if ui.small_button("Yes").clicked() {
+                            import.forget = true;
+                            *confirm_forget = false;
+                        }
+                        if ui.small_button("No").clicked() {
+                            *confirm_forget = false;
+                        }
+                    }
+                }
+            });
+            if import_status.busy {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(egui::RichText::new("Importing…").small().color(MUTED));
+                });
+            } else if let Some(msg) = &import_status.message {
+                ui.label(egui::RichText::new(msg).small().color(MUTED));
+            }
+            if runs.0.is_empty() {
+                ui.label(
+                    egui::RichText::new(
+                        "Import your Strava export (the .zip from Settings > My Account > Download your data) or GPX / TCX / \
+                         FIT files, or drop them on the window. They stay on this device only.",
+                    )
+                    .small()
+                    .italics()
+                    .color(MUTED),
+                );
+                ui.separator();
+            } else {
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut playback.show_routes, "Routes");
                     ui.checkbox(&mut playback.show_ghosts, "Ghost runners");
@@ -241,7 +291,7 @@ fn panel(
 
             egui::CollapsingHeader::new(egui::RichText::new("Controls").color(MUTED)).default_open(false).show(ui, |ui| {
                 let help = match current {
-                    CameraMode::Map => "Drag: move the point you grabbed\nRight drag / Ctrl+drag: orbit around it\nScroll: zoom towards the cursor",
+                    CameraMode::Map => "Drag: move the point you grabbed\nRight drag / Ctrl+drag: orbit around it\nScroll: zoom towards the cursor\nWASD / arrows: glide, Shift: ×4.5\nQ/E: turn, R/F: tilt",
                     CameraMode::Walk => "WASD: run at your pace, Shift: ×4.5, Space: jump\nG: race ghosts on your routes on/off\nMouse: look around, Esc: release the mouse",
                     CameraMode::ThirdPerson => "WASD: run at your pace, Shift: ×4.5, Space: jump\nG: race ghosts on your routes on/off\nMouse: orbit the camera, scroll: zoom\nEsc: release the mouse",
                     CameraMode::Fly => "WASD: fly, Space/C: up/down\nShift: ×4.5, scroll: speed\nMouse: look, Esc: release the mouse",

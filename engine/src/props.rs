@@ -11,7 +11,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::buildings::Reader;
-use crate::level::{BinaryFile, Heightmap, LevelHandles, LevelState};
+use crate::level::{BinaryFile, Heightmap, LevelHandles, spawn_step};
 use crate::lod::LodChunk;
 
 const CHUNK: f32 = 256.0;
@@ -28,7 +28,7 @@ pub struct PropsPlugin;
 
 impl Plugin for PropsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(LevelState::Ready), spawn_props);
+        app.add_systems(Update, spawn_props.run_if(spawn_step(5)));
     }
 }
 

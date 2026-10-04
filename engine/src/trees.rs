@@ -12,7 +12,7 @@ use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use crate::level::{Heightmap, Level, LevelState, Tree};
+use crate::level::{Heightmap, Level, Tree, spawn_step};
 use crate::lod::LodChunk;
 
 const CHUNK: f32 = 256.0;
@@ -26,7 +26,7 @@ pub struct TreesPlugin;
 
 impl Plugin for TreesPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(LevelState::Ready), spawn_trees);
+        app.add_systems(Update, spawn_trees.run_if(spawn_step(2)));
     }
 }
 

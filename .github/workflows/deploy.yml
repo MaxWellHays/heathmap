@@ -38,6 +38,10 @@ jobs:
       - name: Build map data
         run: data/build.sh
 
+      - name: Export the 3D engine's level
+        run: uv run export_engine.py
+        working-directory: data
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -51,6 +55,27 @@ jobs:
       - name: Build site
         run: npm run build
         working-directory: web
+
+      # v1, the 3D engine, built to WebAssembly here (never committed) and served under /3d/.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      - name: Install trunk
+        run: |
+          curl -sSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C /usr/local/bin trunk
+
+      - name: Build 3D engine (WebAssembly)
+        run: trunk build --cargo-profile web --public-url /heathmap/3d/
+        working-directory: engine
+
+      - name: Add the 3D engine to the site
+        run: cp -r engine/dist web/dist/3d
 
       - uses: actions/upload-pages-artifact@v3
         with:

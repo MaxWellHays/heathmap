@@ -5,7 +5,7 @@ around ORIGIN (a point in British National Grid), with the engine's axes:
   x = east, y = up (elevation), z = south   (Bevy is right-handed, Y-up; north is −z)
 
 Outputs in engine/assets/levels/heath/ (generated, not committed):
-  level.json     extents, resolutions and file names
+  level.json     extents, resolutions, file names and the GPS → level transform (georef)
   terrain.bin    u16 little-endian heightmap, row-major from the north-west corner;
                  elevation = min_ele + value / 100 (centimetre steps)
   ground.png     top-down colour map covering the terrain extent (same orientation)
@@ -15,10 +15,10 @@ Outputs in engine/assets/levels/heath/ (generated, not committed):
   water.bin      pond and lake outlines (engine builds flat water surfaces)
   props.bin      benches, lamps, signals, bus stops, crossings, fountains… (oriented)
   barriers.bin   fences, walls, hedges, retaining walls
-  runs.bin       your runs from a local Strava export (data/raw/strava/), for routes and ghosts
 """
 
 import csv
+import gzip
 import json
 import re
 import struct
@@ -393,34 +393,33 @@ def export_landmarks(meta: dict) -> None:
     meta["landmarks"] = {"file": "landmarks.bin", "count": count}
 
 
-STRAVA_FILE = RAW_DIR / "strava" / "strava_runs.json"  # personal data: local only, never committed
+GEOREF_TERMS = [(i, j) for i in range(4) for j in range(4 - i)]  # cubic in (lon, lat)
 
 
-def export_runs(meta: dict) -> None:
-    """Your runs (from a Strava export, if present) as tracks for routes and ghost runners.
+def export_georef(meta: dict) -> None:
+    """How to place GPS points (WGS84) in the level, for runs imported in the engine.
 
-    Format (little-endian): u32 count, then per run: u64 activity id, i64 start (Unix
-    seconds), u32 point count, point count × (f32 x, f32 z, f32 seconds since start).
-    Runs without GPS (treadmill) are skipped. With no Strava file, an empty list is written.
+    A cubic polynomial in (lon − lon0, lat − lat0) × 100 fitted to the exact WGS84 → BNG
+    transform over the level and a few km around it (error well under a millimetre), so the
+    engine needs no projection library: x = Σ x[k] u^i v^j, z = Σ z[k] u^i v^j over `terms`.
     """
     from pyproj import Transformer
-    out = bytearray(struct.pack("<I", 0))
-    count = 0
-    if STRAVA_FILE.exists():
-        t = Transformer.from_crs("EPSG:4326", "EPSG:27700", always_xy=True)
-        for r in json.loads(STRAVA_FILE.read_text())["runs"]:
-            ll, times = r.get("latlng") or [], r.get("time") or []
-            if len(ll) < 2 or len(times) != len(ll):
-                continue
-            lat, lon = np.array(ll).T
-            xs, ys = t.transform(lon, lat)
-            out += struct.pack("<QqI", int(r["id"]), int(r.get("start_epoch") or 0), len(ll))
-            out += struct.pack(f"<{3 * len(ll)}f", *(v for x, y, tt in zip(xs, ys, times) for v in (*to_local(x, y), float(tt))))
-            count += 1
-    struct.pack_into("<I", out, 0, count)
-    (LEVEL_DIR / "runs.bin").write_bytes(out)
-    meta["runs"] = {"file": "runs.bin", "count": count}
-    print(f"  runs: {count}")
+    to_wgs = Transformer.from_crs("EPSG:27700", "EPSG:4326", always_xy=True)
+    to_bng = Transformer.from_crs("EPSG:4326", "EPSG:27700", always_xy=True)
+    margin = 3000
+    e, n = np.meshgrid(np.linspace(BBOX_BNG[0] - margin, BBOX_BNG[2] + margin, 60),
+                       np.linspace(BBOX_BNG[1] - margin, BBOX_BNG[3] + margin, 60))
+    lon, lat = to_wgs.transform(e.ravel(), n.ravel())
+    lon0, lat0 = to_wgs.transform(*ORIGIN)
+    xs, ys = to_bng.transform(lon, lat)
+    x, z = to_local(np.asarray(xs), np.asarray(ys))
+    u, v = (np.asarray(lon) - lon0) * 100, (np.asarray(lat) - lat0) * 100
+    a = np.stack([u**i * v**j for i, j in GEOREF_TERMS], axis=1)
+    cx, cz = (np.linalg.lstsq(a, t, rcond=None)[0] for t in (x, z))
+    error = max(np.abs(a @ cx - x).max(), np.abs(a @ cz - z).max())
+    meta["georef"] = {"lon0": lon0, "lat0": lat0, "scale": 100, "terms": GEOREF_TERMS,
+                      "x": cx.tolist(), "z": cz.tolist()}
+    print(f"  georef: max error {error * 1000:.3f} mm")
 
 
 # Prop kinds shared with the engine (engine/src/props.rs).
@@ -637,6 +636,15 @@ def export_lines(meta: dict) -> None:
     print(f"  lines: {count}")
 
 
+def compress_bins() -> None:
+    """Gzips the .bin files in place (the engine detects gzip), so the web build downloads
+    quickly from a static host that doesn't compress them itself (GitHub Pages)."""
+    for p in sorted(LEVEL_DIR.glob("*.bin")):
+        data = p.read_bytes()
+        if not data.startswith(b"\x1f\x8b"):
+            p.write_bytes(gzip.compress(data, compresslevel=6, mtime=0))
+
+
 def main() -> None:
     LEVEL_DIR.mkdir(parents=True, exist_ok=True)
     e0, n0, e1, n1 = BBOX_BNG
@@ -653,8 +661,10 @@ def main() -> None:
     export_water(meta)
     export_props(meta)
     export_barriers(meta)
-    export_runs(meta)
+    export_georef(meta)
+    (LEVEL_DIR / "runs.bin").unlink(missing_ok=True)  # runs used to be baked in; now imported in the engine
     (LEVEL_DIR / "level.json").write_text(json.dumps(meta, indent=2) + "\n")
+    compress_bins()
     sizes = {p.name: f"{p.stat().st_size / 1e6:.1f} MB" for p in sorted(LEVEL_DIR.iterdir())}
     print(f"Wrote {LEVEL_DIR}: {sizes}")
 
