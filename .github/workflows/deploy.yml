@@ -70,8 +70,9 @@ jobs:
           curl -sSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz -C /usr/local/bin trunk
 
+      # Two builds (WebGPU and WebGL2) and a loader page that picks one.
       - name: Build 3D engine (WebAssembly)
-        run: trunk build --cargo-profile web --public-url /heathmap/3d/
+        run: ./build-web.sh /heathmap/3d/
         working-directory: engine
 
       - name: Add the 3D engine to the site

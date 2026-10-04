@@ -72,10 +72,15 @@ winit limitation); use the Import button there.
 
 ```bash
 cd engine
-trunk build --cargo-profile web    # writes engine/dist/; `trunk serve --cargo-profile web` to try it locally
+./build-web.sh                     # writes engine/dist/
+python3 -m http.server -d dist 8080
 ```
 
-The `web` profile is an optimised build without LTO, to keep compile time and memory reasonable.
+`dist/` holds two builds of the engine, for WebGPU and for WebGL2, and a loader page that runs
+the WebGPU one where the browser supports it (add `?webgl2` to the URL to force the other). The
+panel shows which one is running. Both use the `web` cargo profile, an optimised build without LTO
+to keep compile time and memory reasonable. For quick iteration on one build,
+`trunk serve --cargo-profile web` serves the WebGL2 version from `engine/index.html`.
 
 ## Running v0 (the web map)
 

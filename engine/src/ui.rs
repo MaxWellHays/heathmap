@@ -77,7 +77,7 @@ const COMPASS: [&str; 8] = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
 #[allow(clippy::too_many_arguments)]
 fn panel(
     mut contexts: EguiContexts,
-    diagnostics: Res<DiagnosticsStore>,
+    (diagnostics, adapter): (Res<DiagnosticsStore>, Option<Res<bevy::render::renderer::RenderAdapterInfo>>),
     mode: Res<State<CameraMode>>,
     (level_state, spawning): (Res<State<LevelState>>, Res<SpawnSequence>),
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
@@ -111,7 +111,8 @@ fn panel(
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Hampstead Heath").color(MUTED));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new(format!("{fps:.0} fps")).color(MUTED).small());
+                    let backend = adapter.as_ref().map_or("", |a| backend_name(a.0.backend.to_str()));
+                    ui.label(egui::RichText::new(format!("{fps:.0} fps · {backend}")).color(MUTED).small());
                 });
             });
             if *level_state.get() != LevelState::Ready || !spawning.finished() {
@@ -345,6 +346,19 @@ fn apply_layers(
         // Towards the sun: x = east, z = south (north is −z).
         let to_sun = Vec3::new(az.sin() * el.cos(), el.sin(), -az.cos() * el.cos());
         *transform = Transform::default().looking_to(-to_sun, Vec3::Y);
+    }
+}
+
+/// The graphics API in use, as shown in the panel (from wgpu's backend name).
+fn backend_name(backend: &str) -> &'static str {
+    match backend {
+        "webgpu" => "WebGPU",
+        "gl" if cfg!(target_arch = "wasm32") => "WebGL2",
+        "gl" => "OpenGL",
+        "vulkan" => "Vulkan",
+        "metal" => "Metal",
+        "dx12" => "DirectX 12",
+        _ => "",
     }
 }
 

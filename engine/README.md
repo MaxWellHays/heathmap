@@ -14,7 +14,7 @@ cd ../engine && cargo run
 Your runs are imported in the app (panel → Import runs…, or drop a Strava export / GPX / TCX / FIT
 files on the window) and kept on this device only; see the main README.
 
-Web: `trunk serve --cargo-profile web` (or `trunk build --cargo-profile web` for `dist/`).
+Web: `./build-web.sh` builds `dist/` (WebGPU and WebGL2 builds plus a loader page); `trunk serve --cargo-profile web` serves just the WebGL2 build while iterating.
 
 Views (keys `1`–`4` or the panel; switching animates the camera):
 - `1` Map: drag moves the point you grabbed (terrain, tree or building); right drag or

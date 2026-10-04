@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>heathmap 3D</title>
+  <!-- Loader for the browser build (see ../build-web.sh): runs the WebGPU build where the
+       browser offers a WebGPU adapter, the WebGL2 build otherwise. ?webgl2 forces WebGL2. -->
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #c7d9eb; }
+    #heathmap { display: block; width: 100%; height: 100%; outline: none; }
+    #loading {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      font: 15px system-ui, sans-serif; color: #2f6b2f; pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="heathmap" tabindex="0"></canvas>
+  <div id="loading">Loading heathmap…</div>
+  <script type="module">
+    const loading = document.getElementById("loading");
+    async function webgpu() {
+      if (new URLSearchParams(location.search).has("webgl2") || !navigator.gpu) return false;
+      try {
+        return !!(await navigator.gpu.requestAdapter());
+      } catch {
+        return false;
+      }
+    }
+    const dir = (await webgpu()) ? "gpu" : "gl";
+    try {
+      const engine = await import(`./${dir}/heathmap-engine.js`);
+      loading.textContent = "Starting…";
+      setTimeout(() => loading.remove(), 0);
+      await engine.default({ module_or_path: `./${dir}/heathmap-engine_bg.wasm` });
+    } catch (e) {
+      // winit leaves the start-up call by throwing once the app is running; that's expected.
+      if (!String(e).includes("Using exceptions for control flow")) {
+        loading.textContent = `Couldn't start heathmap: ${e}`;
+        document.body.appendChild(loading);
+        throw e;
+      }
+    }
+  </script>
+</body>
+</html>
